@@ -55,6 +55,13 @@ jobs:
             os: windows-latest
             cross: false
             packages: -p meshd -p meshctl
+          # ARM64 Windows is what runs on Apple Silicon VMs, and it cannot borrow the x64
+          # build: wintun.dll embeds an architecture-matched kernel driver, so an emulated
+          # x64 process has no way to install the ARM64 one it would need.
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            cross: false
+            packages: -p meshd -p meshctl
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
