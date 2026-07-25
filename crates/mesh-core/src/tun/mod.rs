@@ -51,41 +51,45 @@ pub(crate) fn run(cmd: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// The four-byte header macOS puts in front of every utun packet: an address family in
-/// network byte order.
+/// utun framing and unit numbering.
 ///
-/// Lives here rather than in the macOS module so it is compiled and tested on every platform.
-/// It is the part of the utun path most likely to be subtly wrong, and the part a unit test can
-/// actually reach without a kernel interface.
-pub(crate) const UTUN_AF_INET_HEADER: [u8; 4] = [0, 0, 0, 2];
-pub(crate) const UTUN_HEADER_LEN: usize = 4;
+/// Only macOS calls any of this, but it lives outside the platform module so it is compiled and
+/// tested everywhere. These are the two parts of the utun path most likely to be subtly wrong
+/// and the only parts a test can reach without a kernel interface, so having them covered on
+/// every CI leg is worth more than the dead-code allowance it costs elsewhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod utun {
+    /// The four-byte header on every utun packet: an address family in network byte order.
+    pub const AF_INET_HEADER: [u8; 4] = [0, 0, 0, 2];
+    pub const HEADER_LEN: usize = 4;
 
-/// Prefix a packet with the utun address family header.
-pub(crate) fn utun_frame(packet: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(UTUN_HEADER_LEN + packet.len());
-    out.extend_from_slice(&UTUN_AF_INET_HEADER);
-    out.extend_from_slice(packet);
-    out
-}
-
-/// Strip that header. `None` when there is nothing behind it.
-pub(crate) fn utun_strip(buf: &[u8]) -> Option<&[u8]> {
-    if buf.len() <= UTUN_HEADER_LEN {
-        return None;
+    /// Prefix a packet with the address family header.
+    pub fn frame(packet: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(HEADER_LEN + packet.len());
+        out.extend_from_slice(&AF_INET_HEADER);
+        out.extend_from_slice(packet);
+        out
     }
-    Some(&buf[UTUN_HEADER_LEN..])
-}
 
-/// Turn a requested interface name into a utun unit number.
-///
-/// `sc_unit` is 1-based, so utun0 is unit 1. Zero asks the kernel for whatever is free, which
-/// is what any name that is not `utunN` means, including the `mesh0` we use on Linux.
-pub(crate) fn utun_unit(requested: &str) -> u32 {
-    requested
-        .strip_prefix("utun")
-        .and_then(|n| n.parse::<u32>().ok())
-        .map(|n| n + 1)
-        .unwrap_or(0)
+    /// Strip that header. `None` when there is nothing behind it.
+    pub fn strip(buf: &[u8]) -> Option<&[u8]> {
+        if buf.len() <= HEADER_LEN {
+            return None;
+        }
+        Some(&buf[HEADER_LEN..])
+    }
+
+    /// Turn a requested interface name into a utun unit number.
+    ///
+    /// `sc_unit` is 1-based, so utun0 is unit 1. Zero asks the kernel for whatever is free,
+    /// which is what any name that is not `utunN` means, including the `mesh0` used on Linux.
+    pub fn unit(requested: &str) -> u32 {
+        requested
+            .strip_prefix("utun")
+            .and_then(|n| n.parse::<u32>().ok())
+            .map(|n| n + 1)
+            .unwrap_or(0)
+    }
 }
 
 /// Destination address of an IPv4 packet, if it is one.
@@ -135,33 +139,37 @@ mod tests {
             b"payload",
             1,
         );
-        let framed = utun_frame(&pkt);
-        assert_eq!(&framed[..4], &UTUN_AF_INET_HEADER, "AF_INET, network order");
+        let framed = utun::frame(&pkt);
+        assert_eq!(
+            &framed[..4],
+            &utun::AF_INET_HEADER,
+            "AF_INET, network order"
+        );
         assert_eq!(framed.len(), pkt.len() + 4);
-        assert_eq!(utun_strip(&framed), Some(pkt.as_slice()));
+        assert_eq!(utun::strip(&framed), Some(pkt.as_slice()));
         // The whole point: what comes back out is a packet the rest of the stack understands.
         assert_eq!(
-            ipv4_destination(utun_strip(&framed).unwrap()),
+            ipv4_destination(utun::strip(&framed).unwrap()),
             Some(std::net::Ipv4Addr::new(10, 201, 0, 3))
         );
     }
 
     #[test]
     fn a_header_with_nothing_behind_it_is_not_a_packet() {
-        assert!(utun_strip(&[]).is_none());
-        assert!(utun_strip(&UTUN_AF_INET_HEADER).is_none());
-        assert!(utun_strip(&[0, 0, 0, 2, 0x45]).is_some());
+        assert!(utun::strip(&[]).is_none());
+        assert!(utun::strip(&utun::AF_INET_HEADER).is_none());
+        assert!(utun::strip(&[0, 0, 0, 2, 0x45]).is_some());
     }
 
     #[test]
     fn utun_unit_numbers_are_one_based() {
         // utun0 is unit 1; the off-by-one here would silently open the wrong interface.
-        assert_eq!(utun_unit("utun0"), 1);
-        assert_eq!(utun_unit("utun7"), 8);
+        assert_eq!(utun::unit("utun0"), 1);
+        assert_eq!(utun::unit("utun7"), 8);
         // Anything else means "kernel picks".
-        assert_eq!(utun_unit("utun"), 0);
-        assert_eq!(utun_unit("mesh0"), 0);
-        assert_eq!(utun_unit("utunX"), 0);
-        assert_eq!(utun_unit(""), 0);
+        assert_eq!(utun::unit("utun"), 0);
+        assert_eq!(utun::unit("mesh0"), 0);
+        assert_eq!(utun::unit("utunX"), 0);
+        assert_eq!(utun::unit(""), 0);
     }
 }

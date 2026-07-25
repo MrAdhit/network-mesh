@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use tokio::io::unix::AsyncFd;
 
-use super::{MTU, UTUN_HEADER_LEN, run, utun_frame, utun_strip, utun_unit};
+use super::{MTU, run, utun};
 
 const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
 
@@ -30,7 +30,7 @@ impl TunDevice {
     /// including the `mesh0` we use on Linux, asks the kernel for whatever is free, because
     /// macOS will not let us name the interface ourselves.
     pub fn open(requested: &str, address: std::net::Ipv4Addr, subnet: &str) -> Result<Self> {
-        let unit = utun_unit(requested);
+        let unit = utun::unit(requested);
 
         let raw: RawFd =
             unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) };
@@ -134,7 +134,7 @@ impl TunDevice {
     pub async fn recv(&self) -> Result<Vec<u8>> {
         loop {
             let mut guard = self.fd.readable().await?;
-            let mut buf = vec![0u8; MTU as usize + 64 + UTUN_HEADER_LEN];
+            let mut buf = vec![0u8; MTU as usize + 64 + utun::HEADER_LEN];
             let res = guard.try_io(|inner| {
                 let n = unsafe {
                     libc::read(
@@ -152,7 +152,7 @@ impl TunDevice {
             match res {
                 Ok(Ok(n)) => {
                     buf.truncate(n);
-                    match utun_strip(&buf) {
+                    match utun::strip(&buf) {
                         Some(pkt) => return Ok(pkt.to_vec()),
                         None => continue, // header only, nothing to forward
                     }
@@ -167,7 +167,7 @@ impl TunDevice {
     pub async fn send(&self, packet: &[u8]) -> Result<()> {
         // IPv6 would need AF_INET6 here; the mesh is IPv4 only for now and node.rs drops
         // anything else before it reaches this point.
-        let framed = utun_frame(packet);
+        let framed = utun::frame(packet);
 
         loop {
             let mut guard = self.fd.writable().await?;
