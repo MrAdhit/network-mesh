@@ -1600,6 +1600,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tracing-subscriber",
  "ts_control",
  "ts_derp",
  "ts_keys",

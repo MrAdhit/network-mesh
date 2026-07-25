@@ -38,3 +38,4 @@ url = "2"
 
 [dev-dependencies]
 webpki-roots = "1"
+tracing-subscriber = { workspace = true }

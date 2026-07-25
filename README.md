@@ -23,7 +23,7 @@ crates/mesh-core     the library: enrollment, tunnels, probing, path selection
   direct.rs            our own peer discovery: candidates, punching, confirmation
   stun.rs              RFC 5389, enough of it to learn a reflexive address
   nat.rs               classifying the NAT, and predicting a port without poisoning it
-  tun.rs               the kernel interface
+  tun/                 the kernel interface: Linux /dev/net/tun, macOS utun
   cloudflare/api.rs    service token -> enrollment JWT -> register -> MASQUE enroll
   cloudflare/h3.rs     hand-rolled HTTP/3: QUIC varints, QPACK, frames, datagram framing
   cloudflare/tunnel.rs Connect-IP over quinn, mutual TLS with a self-signed P-256 cert
@@ -120,6 +120,29 @@ A live TCP connection survives losing its path. With a stream running over the d
 dropping UDP 47778 moves the winner to Cloudflare and latency from 0.2ms to 35ms, and the
 stream keeps going with no gap and no reconnect. That is what encapsulating rather than
 rewriting buys: the guest's 5-tuple never changes, so TCP never notices.
+
+## Platforms
+
+`meshd` and `meshctl` run on Linux and macOS. `meshcp` is Linux only, deliberately: it is a
+server and there is no reason to run it on a laptop.
+
+The TUN layer is the only part that differs, and it differs more than it looks. Linux opens
+`/dev/net/tun`, configures it by ioctl, and carries bare IP packets. macOS has no such device: a
+utun is a socket opened against the `com.apple.net.utun_control` kernel control, the kernel
+chooses the interface number rather than accepting one, and every packet carries a four-byte
+address family header that has to be added on write and stripped on read. `tun/` hides both
+behind one type, so nothing above it knows which platform it is on.
+
+Both platforms need root for the interface. On Linux that is `CAP_NET_ADMIN` plus
+`/dev/net/tun`; on macOS it is plain `sudo`. Everything else in the daemon runs unprivileged, and
+if the interface cannot be created `meshd` logs it and carries on, reachable through `meshctl`.
+
+`MESH_TUN_NAME` picks the interface. On macOS only a `utunN` form requests a specific unit;
+anything else, including the Linux default of `mesh0`, means "whatever is free".
+
+```bash
+cargo run -p mesh-core --example tuncheck   # brings up just the interface, needs sudo
+```
 
 ## State
 

@@ -209,9 +209,16 @@ async fn main() -> Result<()> {
     node.apply_roster(&roster.peers).await;
 
     // Bring up the kernel interface last, once we know our address and have paths to use.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if std::env::var("MESH_TUN").map(|v| v != "0").unwrap_or(true) {
-        let name = std::env::var("MESH_TUN_NAME").unwrap_or_else(|_| "mesh0".into());
+        // macOS will not let us name the interface; the kernel hands back a utunN. Asking for
+        // "utun" here means "any free one" and keeps the default meaningful on both platforms.
+        let default_name = if cfg!(target_os = "macos") {
+            "utun"
+        } else {
+            "mesh0"
+        };
+        let name = std::env::var("MESH_TUN_NAME").unwrap_or_else(|_| default_name.into());
         match mesh_core::tun::TunDevice::open(&name, virtual_ip, &roster.subnet) {
             Ok(dev) => node.attach_tun(Arc::new(dev)).await,
             // Without CAP_NET_ADMIN or /dev/net/tun this is the only thing that fails, and the

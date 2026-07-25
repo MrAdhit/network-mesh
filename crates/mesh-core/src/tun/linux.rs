@@ -1,21 +1,13 @@
-//! Linux TUN device: a real kernel interface carrying the mesh's own subnet.
+//! Linux `/dev/net/tun`.
 //!
-//! Packets are encapsulated whole rather than rewritten. That is what makes a mid-connection
-//! path flip safe: the guest's 5-tuple never changes, so TCP does not notice, and we never
-//! touch an inner checksum.
+//! The simple case: one device node, configured by ioctl, carrying bare IP packets because we
+//! ask for `IFF_NO_PI`.
 
 use anyhow::{Context, Result, bail};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use tokio::io::unix::AsyncFd;
 
-/// MTU for the mesh interface.
-///
-/// Bounded by the tightest path, which is Cloudflare: a QUIC datagram gives about 1200 usable
-/// bytes, and we spend some on the Connect-IP framing, the IPv4/UDP wrapper we put inside the
-/// tunnel, and our own frame header. Since the path can flip mid-connection, every path has to
-/// be able to carry any packet, so the smallest one sets the number for all of them. Too high
-/// and oversized packets vanish silently rather than erroring.
-pub const MTU: u32 = 1100;
+use super::{MTU, run};
 
 const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
 const IFF_TUN: libc::c_short = 0x0001;
@@ -136,58 +128,5 @@ impl TunDevice {
                 Err(_would_block) => continue,
             }
         }
-    }
-}
-
-fn run(cmd: &str, args: &[&str]) -> Result<()> {
-    let out = std::process::Command::new(cmd)
-        .args(args)
-        .output()
-        .with_context(|| format!("running {cmd} {}", args.join(" ")))?;
-    if !out.status.success() {
-        bail!(
-            "{cmd} {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(())
-}
-
-/// Destination address of an IPv4 packet, if it is one.
-pub fn ipv4_destination(packet: &[u8]) -> Option<std::net::Ipv4Addr> {
-    if packet.len() < 20 || packet[0] >> 4 != 4 {
-        return None;
-    }
-    Some(std::net::Ipv4Addr::new(
-        packet[16], packet[17], packet[18], packet[19],
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_the_destination_from_an_ipv4_header() {
-        let pkt = crate::ip::build_udp4(
-            std::net::Ipv4Addr::new(10, 201, 0, 2),
-            std::net::Ipv4Addr::new(10, 201, 0, 3),
-            1000,
-            2000,
-            b"x",
-            1,
-        );
-        assert_eq!(
-            ipv4_destination(&pkt),
-            Some(std::net::Ipv4Addr::new(10, 201, 0, 3))
-        );
-    }
-
-    #[test]
-    fn ignores_short_and_non_ipv4_packets() {
-        assert!(ipv4_destination(&[]).is_none());
-        assert!(ipv4_destination(&[0x60; 40]).is_none(), "ipv6 is not ipv4");
-        assert!(ipv4_destination(&[0x45; 4]).is_none(), "too short");
     }
 }

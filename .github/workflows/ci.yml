@@ -27,18 +27,32 @@ jobs:
 
   build:
     name: ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # What the containers and most servers run.
           - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
             cross: false
+            packages: -p meshcp -p meshd -p meshctl
           # Apple Silicon dev machines run arm64 containers, and small cloud
           # instances are increasingly arm64 too.
           - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
             cross: true
+            packages: -p meshcp -p meshd -p meshctl
+          # macOS gets the node and the CLI only. The control plane is a server
+          # and has no reason to run on a laptop.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+            packages: -p meshd -p meshctl
+          - target: x86_64-apple-darwin
+            os: macos-13
+            cross: false
+            packages: -p meshd -p meshctl
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -63,13 +77,16 @@ jobs:
             echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar"
           } >> "$GITHUB_ENV"
 
-      - run: cargo build --release --workspace --target ${{ matrix.target }}
+      - run: cargo build --release ${{ matrix.packages }} --target ${{ matrix.target }}
 
       - name: Collect binaries
         run: |
           mkdir -p dist
-          for bin in meshcp meshd meshctl; do
-            cp "target/${{ matrix.target }}/release/$bin" dist/
+          # Derive the binary list from the packages this target actually builds, so the
+          # macOS legs cannot silently start expecting a control-plane binary.
+          for pkg in ${{ matrix.packages }}; do
+            case "$pkg" in -p) continue ;; esac
+            cp "target/${{ matrix.target }}/release/$pkg" dist/
           done
           # Stripped separately so a failure here is visible rather than silent.
           if [ "${{ matrix.cross }}" = "true" ]; then
