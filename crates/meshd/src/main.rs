@@ -3,15 +3,17 @@
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use mesh_core::cloudflare::{DeviceIdentity, MasqueTunnel, TunnelConfig, api, tunnel};
+use mesh_core::cp::CloudflareConfig;
+use mesh_core::cpclient::{CpClient, NodeIdentity};
+use mesh_core::direct::DirectTransport;
 use mesh_core::ipc::{
     BackhaulReport, PathReport, PeerReport, PingSample, Request, Response, StatusReport,
     default_socket_path,
 };
-use mesh_core::cp::CloudflareConfig;
-use mesh_core::cpclient::{CpClient, NodeIdentity};
-use mesh_core::direct::DirectTransport;
 use mesh_core::node::MeshNode;
-use mesh_core::state::{Bootstrap, CloudflareState, ControlPlaneState, NodeState, default_state_dir};
+use mesh_core::state::{
+    Bootstrap, CloudflareState, ControlPlaneState, NodeState, default_state_dir,
+};
 use mesh_core::tailscale::TailscaleBackhaul;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -214,7 +216,9 @@ async fn main() -> Result<()> {
             Ok(dev) => node.attach_tun(Arc::new(dev)).await,
             // Without CAP_NET_ADMIN or /dev/net/tun this is the only thing that fails, and the
             // mesh is still perfectly usable through meshctl.
-            Err(e) => tracing::warn!(error = %e, "no tun interface; mesh is reachable via meshctl only"),
+            Err(e) => {
+                tracing::warn!(error = %e, "no tun interface; mesh is reachable via meshctl only")
+            }
         }
     }
 
@@ -234,7 +238,10 @@ async fn main() -> Result<()> {
     if stun_servers.is_empty()
         && let Ok(extra) = std::env::var("MESH_STUN_SERVERS")
     {
-        stun_servers = extra.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        stun_servers = extra
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
     }
     if !stun_servers.is_empty() {
         tracing::info!(servers = ?stun_servers, "nat traversal enabled");
@@ -459,7 +466,10 @@ async fn handle(
                     .contains(&mesh_core::PathKind::CloudflareMesh)
                     .then(|| BackhaulReport {
                         up: true,
-                        address: node.cf_ip.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                        address: node
+                            .cf_ip
+                            .map(|i| i.to_string())
+                            .unwrap_or_else(|| "-".into()),
                         detail: "connect-ip over quic".into(),
                     }),
                 tailscale: ts.map(|t| BackhaulReport {

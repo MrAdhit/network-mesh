@@ -191,7 +191,10 @@ impl HelloPayload {
     }
 
     pub fn predicted_addrs(&self) -> Vec<SocketAddr> {
-        self.predicted.iter().filter_map(|s| s.parse().ok()).collect()
+        self.predicted
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect()
     }
 }
 

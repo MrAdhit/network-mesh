@@ -140,7 +140,10 @@ pub fn decode_status(mut buf: &[u8]) -> Option<u16> {
             buf = &buf[name_len as usize..];
             let (val, n) = read_string(buf)?;
             buf = &buf[n..];
-            if !huff_name && name == b":status" && let Ok(s) = val.parse::<u16>() {
+            if !huff_name
+                && name == b":status"
+                && let Ok(s) = val.parse::<u16>()
+            {
                 return Some(s);
             }
         } else {

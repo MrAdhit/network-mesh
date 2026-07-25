@@ -146,11 +146,15 @@ async fn get_network(State(app): Ctx, headers: HeaderMap) -> Reply<NetworkView> 
         addresses_available: capacity as usize - nodes.len().min(capacity as usize),
         cloudflare: BackhaulStatus {
             configured: cf.is_some(),
-            detail: cf.map(|(_, m)| m).unwrap_or_else(|| "not configured".into()),
+            detail: cf
+                .map(|(_, m)| m)
+                .unwrap_or_else(|| "not configured".into()),
         },
         tailscale: BackhaulStatus {
             configured: ts.is_some(),
-            detail: ts.map(|(_, m)| m).unwrap_or_else(|| "not configured".into()),
+            detail: ts
+                .map(|(_, m)| m)
+                .unwrap_or_else(|| "not configured".into()),
         },
     }))
 }
@@ -184,10 +188,7 @@ async fn set_cloudflare(
         "service_client_id": provisioned.service_client_id,
         "service_client_secret": provisioned.service_client_secret,
     });
-    let sealed = app
-        .sealer
-        .seal(&payload.to_string())
-        .map_err(internal)?;
+    let sealed = app.sealer.seal(&payload.to_string()).map_err(internal)?;
     let meta = format!("team {}, service token provisioned", provisioned.team);
     app.db
         .put_cred(&account.id, CRED_CLOUDFLARE, &sealed, &meta)
@@ -352,7 +353,10 @@ async fn roster(
             // Deliberately excludes api_token: a node never needs account-level access.
             Some(CloudflareConfig {
                 team: v["team"].as_str().unwrap_or_default().to_string(),
-                service_client_id: v["service_client_id"].as_str().unwrap_or_default().to_string(),
+                service_client_id: v["service_client_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 service_client_secret: v["service_client_secret"]
                     .as_str()
                     .unwrap_or_default()

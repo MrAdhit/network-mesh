@@ -47,7 +47,11 @@ pub async fn enrollment_jwt(team: &str, client_id: &str, client_secret: &str) ->
     if !loc.starts_with("com.cloudflare.warp://") {
         bail!(
             "service token rejected: Access redirected to {} (check the Service Auth policy)",
-            if loc.is_empty() { "<no location>" } else { &loc }
+            if loc.is_empty() {
+                "<no location>"
+            } else {
+                &loc
+            }
         );
     }
     loc.split_once("token=")

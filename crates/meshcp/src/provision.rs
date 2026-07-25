@@ -67,7 +67,10 @@ struct CfServiceToken {
 
 /// Verify the token, find the Zero Trust org, and make sure a Service Auth path into the WARP
 /// enrollment app exists. Returns what a node needs to enroll itself.
-pub async fn provision_cloudflare(api_token: &str, account_id: &str) -> Result<CloudflareProvisioned> {
+pub async fn provision_cloudflare(
+    api_token: &str,
+    account_id: &str,
+) -> Result<CloudflareProvisioned> {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
@@ -87,7 +90,9 @@ pub async fn provision_cloudflare(api_token: &str, account_id: &str) -> Result<C
 
     // 2. The team name is the auth domain's first label.
     let orgs: CfEnvelope<CfOrg> = http
-        .get(format!("{CF_API}/accounts/{account_id}/access/organizations"))
+        .get(format!(
+            "{CF_API}/accounts/{account_id}/access/organizations"
+        ))
         .header("Authorization", &auth)
         .send()
         .await?
@@ -121,7 +126,9 @@ pub async fn provision_cloudflare(api_token: &str, account_id: &str) -> Result<C
 
     // 4. Mint a service token. The secret is only ever returned here.
     let token: CfEnvelope<CfServiceToken> = http
-        .post(format!("{CF_API}/accounts/{account_id}/access/service_tokens"))
+        .post(format!(
+            "{CF_API}/accounts/{account_id}/access/service_tokens"
+        ))
         .header("Authorization", &auth)
         .json(&serde_json::json!({ "name": "mesh-enrollment" }))
         .send()

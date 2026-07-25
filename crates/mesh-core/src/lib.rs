@@ -11,9 +11,9 @@ pub mod node;
 pub mod proto;
 pub mod state;
 pub mod stun;
+pub mod tailscale;
 #[cfg(target_os = "linux")]
 pub mod tun;
-pub mod tailscale;
 pub mod util;
 
 pub use node::{MeshNode, PathStats, PeerState};

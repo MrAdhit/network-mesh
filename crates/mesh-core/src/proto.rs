@@ -203,7 +203,8 @@ mod tests {
 
     #[test]
     fn rejects_an_older_frame_version() {
-        let mut raw = Frame::new(MsgType::Probe, PathKind::CloudflareMesh, 1, "a", [1u8; 32]).encode();
+        let mut raw =
+            Frame::new(MsgType::Probe, PathKind::CloudflareMesh, 1, "a", [1u8; 32]).encode();
         raw[4] = 1;
         assert!(Frame::decode(&raw).is_err());
     }

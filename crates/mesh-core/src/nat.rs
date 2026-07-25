@@ -150,7 +150,10 @@ mod tests {
 
     #[test]
     fn port_preserving_is_recognised() {
-        let p = NatProfile::classify(47778, vec![addr("203.0.113.1:47778"), addr("203.0.113.1:47778")]);
+        let p = NatProfile::classify(
+            47778,
+            vec![addr("203.0.113.1:47778"), addr("203.0.113.1:47778")],
+        );
         assert_eq!(p.mapping, Mapping::PortPreserving);
         assert!(!p.looks_poisoned());
         assert_eq!(
@@ -162,14 +165,20 @@ mod tests {
 
     #[test]
     fn endpoint_independent_needs_no_prediction() {
-        let p = NatProfile::classify(47778, vec![addr("203.0.113.1:51000"), addr("203.0.113.1:51000")]);
+        let p = NatProfile::classify(
+            47778,
+            vec![addr("203.0.113.1:51000"), addr("203.0.113.1:51000")],
+        );
         assert_eq!(p.mapping, Mapping::EndpointIndependent);
         assert!(p.predicted_candidates(4).is_empty());
     }
 
     #[test]
     fn endpoint_dependent_extrapolates_from_the_step() {
-        let p = NatProfile::classify(47778, vec![addr("203.0.113.1:51000"), addr("203.0.113.1:51002")]);
+        let p = NatProfile::classify(
+            47778,
+            vec![addr("203.0.113.1:51000"), addr("203.0.113.1:51002")],
+        );
         assert_eq!(p.mapping, Mapping::EndpointDependent { delta: 2 });
         let got = p.predicted_candidates(3);
         // Port preservation is tried first, then the extrapolation.
@@ -181,7 +190,10 @@ mod tests {
     #[test]
     fn a_poisoned_mapping_is_visible() {
         // We asked for 47778 and the world consistently sees something else.
-        let p = NatProfile::classify(47778, vec![addr("203.0.113.1:33000"), addr("203.0.113.1:34000")]);
+        let p = NatProfile::classify(
+            47778,
+            vec![addr("203.0.113.1:33000"), addr("203.0.113.1:34000")],
+        );
         assert!(p.looks_poisoned());
     }
 
@@ -194,7 +206,10 @@ mod tests {
 
     #[test]
     fn predictions_stay_inside_the_port_range() {
-        let p = NatProfile::classify(47778, vec![addr("203.0.113.1:65530"), addr("203.0.113.1:65534")]);
+        let p = NatProfile::classify(
+            47778,
+            vec![addr("203.0.113.1:65530"), addr("203.0.113.1:65534")],
+        );
         assert!(
             p.predicted_candidates(8).iter().all(|a| a.port() > 0),
             "wrapped past the end of the port range"
@@ -213,13 +228,19 @@ mod tests {
         );
         assert_eq!(healthy.mapping, Mapping::PortPreserving);
         assert!(!healthy.looks_poisoned());
-        assert_eq!(healthy.predicted_candidates(4), vec![addr("203.0.113.5:7777")]);
+        assert_eq!(
+            healthy.predicted_candidates(4),
+            vec![addr("203.0.113.5:7777")]
+        );
 
         let poisoned = NatProfile::classify(
             7777,
             vec![addr("203.0.113.5:41234"), addr("203.0.113.5:9876")],
         );
-        assert!(matches!(poisoned.mapping, Mapping::EndpointDependent { .. }));
+        assert!(matches!(
+            poisoned.mapping,
+            Mapping::EndpointDependent { .. }
+        ));
         assert!(
             poisoned.looks_poisoned(),
             "a poisoned mapping must be visible, or we keep binding a port that will never work"

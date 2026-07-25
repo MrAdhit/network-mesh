@@ -1,0 +1,89 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace on a CI failure is worth more than the noise it adds.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # What the containers and most servers run.
+          - target: x86_64-unknown-linux-gnu
+            cross: false
+          # Apple Silicon dev machines run arm64 containers, and small cloud
+          # instances are increasingly arm64 too.
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # aws-lc-rs (via rustls) and libsqlite3-sys both build C, so a cross build
+      # needs a cross compiler and cmake, not just a Rust target.
+      - name: Install cross toolchain
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu cmake
+          {
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+            echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+            echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++"
+            echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar"
+          } >> "$GITHUB_ENV"
+
+      - run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: Collect binaries
+        run: |
+          mkdir -p dist
+          for bin in meshcp meshd meshctl; do
+            cp "target/${{ matrix.target }}/release/$bin" dist/
+          done
+          # Stripped separately so a failure here is visible rather than silent.
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            aarch64-linux-gnu-strip dist/* || true
+          else
+            strip dist/* || true
+          fi
+          ls -la dist
+          # Prove the artifacts are for the architecture the job claims.
+          file dist/meshd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mesh-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

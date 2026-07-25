@@ -68,7 +68,10 @@ impl TunDevice {
         // Configuring the interface via iproute2 rather than a pile of further ioctls: the
         // container already has it, and the commands are legible in a log when they fail.
         run("ip", &["link", "set", "dev", name, "mtu", &MTU.to_string()])?;
-        run("ip", &["addr", "add", &format!("{address}/32"), "dev", name])?;
+        run(
+            "ip",
+            &["addr", "add", &format!("{address}/32"), "dev", name],
+        )?;
         run("ip", &["link", "set", "dev", name, "up"])?;
         // Route the whole mesh subnet at the interface; per-peer routing happens above.
         run("ip", &["route", "replace", subnet, "dev", name])?;

@@ -84,10 +84,9 @@ impl Sealer {
         }
         let (nonce_bytes, ct) = sealed.split_at(24);
         let nonce: [u8; 24] = nonce_bytes.try_into().expect("checked length above");
-        let pt = self
-            .cipher
-            .decrypt(&XNonce::from(nonce), ct)
-            .map_err(|_| anyhow!("could not decrypt stored credential; was MESH_CP_SECRET changed?"))?;
+        let pt = self.cipher.decrypt(&XNonce::from(nonce), ct).map_err(|_| {
+            anyhow!("could not decrypt stored credential; was MESH_CP_SECRET changed?")
+        })?;
         Ok(String::from_utf8(pt)?)
     }
 }

@@ -93,7 +93,14 @@ fn hostname_matches(candidate: &str, wanted: &str) -> bool {
 fn log_peers(map: &BTreeMap<ts_control::NodeId, PeerNode>) {
     let summary: Vec<String> = map
         .values()
-        .map(|p| format!("{}({},{})", p.hostname, p.id, if p.online { "up" } else { "down" }))
+        .map(|p| {
+            format!(
+                "{}({},{})",
+                p.hostname,
+                p.id,
+                if p.online { "up" } else { "down" }
+            )
+        })
         .collect();
     tracing::debug!(peers = %summary.join(" "), "netmap peers");
 }

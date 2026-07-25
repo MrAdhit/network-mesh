@@ -196,7 +196,9 @@ fn session() -> Result<String> {
     std::env::var("MESH_SESSION")
         .ok()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("not logged in: run `meshctl login` and export MESH_SESSION"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("not logged in: run `meshctl login` and export MESH_SESSION")
+        })
 }
 
 /// Unwrap the control plane's reply, preferring its own error text over a status code.
@@ -242,8 +244,13 @@ async fn control_plane(args: &[String]) -> Result<()> {
                     })?,
                 )
             };
-            let r: SessionResponse =
-                unwrap_cp(http.post(format!("{base}{path}")).json(&body).send().await?).await?;
+            let r: SessionResponse = unwrap_cp(
+                http.post(format!("{base}{path}"))
+                    .json(&body)
+                    .send()
+                    .await?,
+            )
+            .await?;
             println!("account {}", r.account_id);
             println!("\nexport MESH_SESSION={}", r.session_token);
         }
@@ -257,14 +264,25 @@ async fn control_plane(args: &[String]) -> Result<()> {
             .await?;
             println!("account     {} ({})", r.account_id, r.email);
             println!("subnet      {}", r.subnet);
-            println!("nodes       {} used, {} addresses free", r.node_count, r.addresses_available);
+            println!(
+                "nodes       {} used, {} addresses free",
+                r.node_count, r.addresses_available
+            );
             println!(
                 "cloudflare  {}",
-                if r.cloudflare.configured { &r.cloudflare.detail } else { "not configured" }
+                if r.cloudflare.configured {
+                    &r.cloudflare.detail
+                } else {
+                    "not configured"
+                }
             );
             println!(
                 "tailscale   {}",
-                if r.tailscale.configured { &r.tailscale.detail } else { "not configured" }
+                if r.tailscale.configured {
+                    &r.tailscale.detail
+                } else {
+                    "not configured"
+                }
             );
         }
         "set-subnet" => {
@@ -274,7 +292,9 @@ async fn control_plane(args: &[String]) -> Result<()> {
             let r: NetworkView = unwrap_cp(
                 http.patch(format!("{base}/v1/network"))
                     .header(SESSION_HEADER, session()?)
-                    .json(&SetSubnetRequest { subnet: args[1].clone() })
+                    .json(&SetSubnetRequest {
+                        subnet: args[1].clone(),
+                    })
                     .send()
                     .await?,
             )
@@ -306,7 +326,9 @@ async fn control_plane(args: &[String]) -> Result<()> {
             let r: BackhaulStatus = unwrap_cp(
                 http.put(format!("{base}/v1/network/backhauls/tailscale"))
                     .header(SESSION_HEADER, session()?)
-                    .json(&TailscaleCredsRequest { api_token: args[1].clone() })
+                    .json(&TailscaleCredsRequest {
+                        api_token: args[1].clone(),
+                    })
                     .send()
                     .await?,
             )

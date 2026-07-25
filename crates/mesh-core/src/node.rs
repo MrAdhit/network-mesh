@@ -293,9 +293,7 @@ impl MeshNode {
                     .ok_or_else(|| anyhow!("direct transport is not up"))?;
                 let (confirmed, candidates) = {
                     let r = self.peers.read().await;
-                    let p = r
-                        .get(peer)
-                        .ok_or_else(|| anyhow!("unknown peer {peer}"))?;
+                    let p = r.get(peer).ok_or_else(|| anyhow!("unknown peer {peer}"))?;
                     (p.direct_confirmed, p.direct_candidates.clone())
                 };
                 match confirmed {
@@ -429,7 +427,11 @@ impl MeshNode {
         }
         .encode();
 
-        let seq = if want_reply { HELLO_WANT_REPLY } else { HELLO_REPLY };
+        let seq = if want_reply {
+            HELLO_WANT_REPLY
+        } else {
+            HELLO_REPLY
+        };
         for path in self.paths_for(peer).await {
             let f = Frame::new(MsgType::Hello, path, seq, &self.name, self.self_key)
                 .with_payload(payload.clone());
@@ -443,7 +445,8 @@ impl MeshNode {
         arrived_on: PathKind,
         via_node_key: Option<ts_keys::NodePublicKey>,
     ) {
-        self.handle_frame_from(frame, arrived_on, via_node_key, None).await
+        self.handle_frame_from(frame, arrived_on, via_node_key, None)
+            .await
     }
 
     /// Fire a burst at every candidate a peer has advertised.
@@ -476,8 +479,13 @@ impl MeshNode {
         tracing::debug!(peer, count = candidates.len(), "punching at candidates");
         for _ in 0..PUNCH_BURST {
             let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-            let frame =
-                Frame::new(MsgType::Probe, PathKind::Direct, seq, &self.name, self.self_key);
+            let frame = Frame::new(
+                MsgType::Probe,
+                PathKind::Direct,
+                seq,
+                &self.name,
+                self.self_key,
+            );
             let bytes = frame.encode();
             self.inflight
                 .lock()
@@ -508,7 +516,11 @@ impl MeshNode {
             seen_you_at: None,
         }
         .encode();
-        let seq = if want_reply { HELLO_WANT_REPLY } else { HELLO_REPLY };
+        let seq = if want_reply {
+            HELLO_WANT_REPLY
+        } else {
+            HELLO_REPLY
+        };
 
         // Relays only. A punch request that needed the direct path would be circular.
         for path in self.available_paths() {
@@ -678,8 +690,13 @@ impl MeshNode {
             MsgType::Probe => {
                 // Reply on the path the probe arrived on, echoing its seq and path id, so the
                 // sender can attribute the RTT even if routing is asymmetric.
-                let reply =
-                    Frame::new(MsgType::ProbeReply, frame.path, frame.seq, &self.name, self.self_key);
+                let reply = Frame::new(
+                    MsgType::ProbeReply,
+                    frame.path,
+                    frame.seq,
+                    &self.name,
+                    self.self_key,
+                );
                 if let Err(e) = self.send_on(&frame.sender, arrived_on, &reply).await {
                     tracing::debug!(peer = %frame.sender, error = %e, "probe reply failed");
                 }
@@ -814,7 +831,12 @@ impl MeshNode {
     ///
     /// Deliberately sends the identical frame down every path so the numbers are comparable;
     /// the only difference between them is the backhaul underneath.
-    pub async fn ping(self: &Arc<Self>, peer: &str, count: u32, timeout: Duration) -> Vec<(PathKind, u32, Option<Duration>)> {
+    pub async fn ping(
+        self: &Arc<Self>,
+        peer: &str,
+        count: u32,
+        timeout: Duration,
+    ) -> Vec<(PathKind, u32, Option<Duration>)> {
         let mut out = Vec::new();
         for i in 0..count {
             for path in self.paths_for(peer).await {
@@ -822,7 +844,10 @@ impl MeshNode {
                 let key = (peer.to_string(), path, seq);
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 self.waiters.lock().await.insert(key.clone(), tx);
-                self.inflight.lock().await.insert(key.clone(), Instant::now());
+                self.inflight
+                    .lock()
+                    .await
+                    .insert(key.clone(), Instant::now());
 
                 let frame = Frame::new(MsgType::Probe, path, seq, &self.name, self.self_key);
                 if self.send_on(peer, path, &frame).await.is_err() {
@@ -924,9 +949,7 @@ impl MeshNode {
                                 continue;
                             }
                             match Frame::decode(&udp.payload) {
-                                Ok(f) => {
-                                    me.handle_frame(f, PathKind::CloudflareMesh, None).await
-                                }
+                                Ok(f) => me.handle_frame(f, PathKind::CloudflareMesh, None).await,
                                 Err(e) => tracing::trace!(error = %e, "non-mesh udp in tunnel"),
                             }
                         }
@@ -945,9 +968,7 @@ impl MeshNode {
                 loop {
                     match ts.recv().await {
                         Ok((src, bytes)) => match Frame::decode(&bytes) {
-                            Ok(f) => {
-                                me.handle_frame(f, PathKind::TailscaleDerp, Some(src)).await
-                            }
+                            Ok(f) => me.handle_frame(f, PathKind::TailscaleDerp, Some(src)).await,
                             Err(e) => tracing::trace!(error = %e, "non-mesh packet over derp"),
                         },
                         Err(e) => {
@@ -966,7 +987,8 @@ impl MeshNode {
                     match direct.recv().await {
                         Ok((from, bytes)) => match Frame::decode(&bytes) {
                             Ok(f) => {
-                                me.handle_frame_from(f, PathKind::Direct, None, Some(from)).await
+                                me.handle_frame_from(f, PathKind::Direct, None, Some(from))
+                                    .await
                             }
                             Err(e) => tracing::trace!(%from, error = %e, "non-mesh udp"),
                         },

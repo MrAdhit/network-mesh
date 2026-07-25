@@ -252,7 +252,8 @@ impl MasqueTunnel {
             ("capsule-protocol", "?1"),
             ("user-agent", ""),
         ]);
-        send.write_all(&h3::frame(h3::FRAME_HEADERS, &fields)).await?;
+        send.write_all(&h3::frame(h3::FRAME_HEADERS, &fields))
+            .await?;
 
         // Response HEADERS. Cloudflare sends no body and no routes, so this is all we wait for.
         let mut acc = Vec::new();

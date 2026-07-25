@@ -69,7 +69,8 @@ async fn main() -> Result<()> {
         (":path", "/"),
         ("user-agent", "mesh-h3check"),
     ]);
-    send.write_all(&h3::frame(h3::FRAME_HEADERS, &fields)).await?;
+    send.write_all(&h3::frame(h3::FRAME_HEADERS, &fields))
+        .await?;
     send.finish()?;
     println!("request sent, {} bytes of qpack", fields.len());
 

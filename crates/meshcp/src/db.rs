@@ -105,7 +105,12 @@ impl Db {
 
     // ---- accounts and sessions ----
 
-    pub fn create_account(&self, email: &str, password_hash: &str, subnet: &str) -> Result<Account> {
+    pub fn create_account(
+        &self,
+        email: &str,
+        password_hash: &str,
+        subnet: &str,
+    ) -> Result<Account> {
         let id = crate::crypto::token("acc_");
         let conn = self.lock();
         conn.execute(
@@ -315,7 +320,12 @@ impl Db {
     /// Re-enrolling with a known key is idempotent on purpose: a node that loses its token but
     /// keeps its keypair must get the same address back, because the whole point of the address
     /// is that it does not move.
-    pub fn enroll_node(&self, account_id: &str, name: &str, public_key: &str) -> Result<(Node, String)> {
+    pub fn enroll_node(
+        &self,
+        account_id: &str,
+        name: &str,
+        public_key: &str,
+    ) -> Result<(Node, String)> {
         if let Some((node, token)) = self.node_by_public_key(account_id, public_key)? {
             return Ok((node, token));
         }
@@ -347,7 +357,11 @@ impl Db {
         ))
     }
 
-    fn node_by_public_key(&self, account_id: &str, public_key: &str) -> Result<Option<(Node, String)>> {
+    fn node_by_public_key(
+        &self,
+        account_id: &str,
+        public_key: &str,
+    ) -> Result<Option<(Node, String)>> {
         let conn = self.lock();
         Ok(conn
             .query_row(
@@ -459,10 +473,7 @@ mod tests {
 
     #[test]
     fn allocates_sequentially_and_skips_taken() {
-        let taken = vec![
-            Ipv4Addr::new(10, 201, 0, 2),
-            Ipv4Addr::new(10, 201, 0, 3),
-        ];
+        let taken = vec![Ipv4Addr::new(10, 201, 0, 2), Ipv4Addr::new(10, 201, 0, 3)];
         let got = allocate_address("10.201.0.0/16", &taken).unwrap();
         assert_eq!(got, Ipv4Addr::new(10, 201, 0, 4));
     }
