@@ -422,8 +422,27 @@ async fn serve(
         });
     }
 
+    let mut consecutive_failures = 0u32;
     loop {
-        let stream = listener.accept().await?;
+        // One bad accept must not take the daemon down with it. A client that dies mid-handshake
+        // is ordinary, and losing the whole node over it would also lose both backhauls and every
+        // measured path. Only a persistent failure, which means the endpoint itself is gone, is
+        // worth giving up on.
+        let stream = match listener.accept().await {
+            Ok(s) => {
+                consecutive_failures = 0;
+                s
+            }
+            Err(e) => {
+                consecutive_failures += 1;
+                tracing::warn!(error = %e, consecutive_failures, "accepting a meshctl connection failed");
+                if consecutive_failures >= 10 {
+                    return Err(e).context("the control endpoint is no longer usable");
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
         let node = node.clone();
         let ts = ts.clone();
         let subnet = subnet.clone();

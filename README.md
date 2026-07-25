@@ -179,8 +179,17 @@ Windows was verified on ARM64 Windows 11, which is what an Apple Silicon VM runs
 cannot stand in for it: `wintun.dll` embeds a kernel driver matching its own architecture, so an
 emulated x64 process cannot install the ARM64 one it would need.
 
-Still unverified anywhere: `meshcp` runs only on Linux by design, and the Windows named pipe has
-been compiled but not exercised between a real `meshd` and `meshctl`.
+The Windows named pipe is verified too, with a real `meshd` and `meshctl` talking over
+`\\.\pipe\meshd` across repeated connections, which is what exercises the per-connection pipe
+instance the listener has to create each time.
+
+That test also made a Windows machine a full member of the mesh: enrolled through the control
+plane, both backhauls up, and a direct path punched to two Linux containers, one of them behind
+a simulated CGNAT. The direct path won at about 1ms against 33ms via Cloudflare and 99ms via
+DERP.
+
+Still unverified: `meshcp` runs only on Linux by design, and no Windows node has yet carried
+traffic over its TUN interface, since the pipe test ran with `MESH_TUN=0`.
 
 ## State
 
