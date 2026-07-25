@@ -117,7 +117,7 @@ pub struct MeshNode {
     cf: Option<Arc<MasqueTunnel>>,
     ts: Option<Arc<TailscaleBackhaul>>,
     direct: Option<Arc<DirectTransport>>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     tun: Arc<RwLock<Option<Arc<crate::tun::TunDevice>>>>,
     /// What peers report seeing as our source address. Our reflexive candidate, learned
     /// without a STUN server.
@@ -154,7 +154,7 @@ impl MeshNode {
             cf,
             ts,
             direct,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             tun: Default::default(),
             reflexive: Default::default(),
             nat: Default::default(),
@@ -789,7 +789,7 @@ impl MeshNode {
                 });
             }
             MsgType::Tunnel => {
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
                 {
                     let tun = self.tun.read().await.clone();
                     match tun {
@@ -879,7 +879,7 @@ impl MeshNode {
     /// Routing is by destination address alone: the roster gives every peer an address in our
     /// subnet, so a packet's destination names its peer. Nothing about the packet is modified,
     /// which is why a path flip cannot break an established connection.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub async fn attach_tun(self: &Arc<Self>, tun: Arc<crate::tun::TunDevice>) {
         *self.tun.write().await = Some(tun.clone());
         let me = self.clone();

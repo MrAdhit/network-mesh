@@ -12,7 +12,7 @@ pub mod proto;
 pub mod state;
 pub mod stun;
 pub mod tailscale;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod tun;
 pub mod util;
 

@@ -4,11 +4,13 @@
 //! path flip safe: the guest's 5-tuple never changes, so TCP does not notice, and we never
 //! touch an inner checksum.
 //!
-//! The two supported platforms differ more than they look. Linux has a single `/dev/net/tun`
-//! that is configured by ioctl and carries bare IP packets. macOS has no such device: a utun is
-//! a socket opened against a kernel control, the kernel picks the interface number rather than
-//! taking one, and every packet carries a four-byte address family header. `TunDevice` hides
-//! all of that, so `node.rs` never learns which platform it is on.
+//! The three supported platforms differ more than they look. Linux has a single `/dev/net/tun`
+//! configured by ioctl, carrying bare IP packets. macOS has no such device: a utun is a socket
+//! opened against a kernel control, the kernel picks the interface number rather than taking
+//! one, and every packet carries a four-byte address family header. Windows has nothing at all
+//! natively, so it borrows WireGuard's Wintun driver, which moves packets through shared ring
+//! buffers with no file descriptor to poll. `TunDevice` hides all of that, so `node.rs` never
+//! learns which platform it is on.
 
 use anyhow::{Context, Result, bail};
 
@@ -21,6 +23,11 @@ pub use linux::TunDevice;
 mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::TunDevice;
+
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::TunDevice;
 
 /// MTU for the mesh interface.
 ///

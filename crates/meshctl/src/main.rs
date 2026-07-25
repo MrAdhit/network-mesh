@@ -1,7 +1,7 @@
 //! meshctl: talks to meshd over its unix socket.
 
 use anyhow::{Result, bail};
-use mesh_core::ipc::{Request, Response, call, default_socket_path};
+use mesh_core::ipc::{Request, Response, call, default_endpoint};
 
 const USAGE: &str = "\
 meshctl - control the mesh daemon and its network
@@ -24,7 +24,7 @@ NETWORK (talks to the control plane):
     meshctl remove-node <node-id>
 
 ENVIRONMENT:
-    MESH_SOCKET    daemon socket (default: <state dir>/meshd.sock)
+    MESH_SOCKET    daemon endpoint (unix: a socket path, windows: a named pipe)
     MESH_CP_URL    control plane base URL
     MESH_SESSION   session token; `login` and `signup` print one to export
 ";
@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
         return control_plane(&args).await;
     }
 
-    let sock = default_socket_path();
+    let endpoint = default_endpoint();
     let req = match args[0].as_str() {
         "status" => Request::Status,
         "peers" => Request::Peers,
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         other => bail!("unknown command {other:?}\n\n{USAGE}"),
     };
 
-    match call(&sock, &req).await? {
+    match call(&endpoint, &req).await? {
         Response::Status(s) => {
             println!("node       {}", s.node_name);
             println!("address    {}  in {}", s.virtual_ip, s.subnet);

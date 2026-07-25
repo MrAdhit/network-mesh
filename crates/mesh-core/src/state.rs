@@ -9,9 +9,21 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub fn default_state_dir() -> PathBuf {
-    std::env::var("MESH_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/var/lib/mesh"))
+    if let Ok(v) = std::env::var("MESH_STATE_DIR")
+        && !v.is_empty()
+    {
+        return PathBuf::from(v);
+    }
+    #[cfg(windows)]
+    {
+        // ProgramData is the machine-wide equivalent, and meshd runs elevated anyway.
+        let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+        PathBuf::from(base).join("mesh")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/var/lib/mesh")
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

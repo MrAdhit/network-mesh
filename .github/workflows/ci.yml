@@ -50,6 +50,11 @@ jobs:
             os: macos-latest
             cross: false
             packages: -p meshd -p meshctl
+          # Windows likewise gets the node and the CLI only.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+            packages: -p meshd -p meshctl
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -76,7 +81,19 @@ jobs:
 
       - run: cargo build --release ${{ matrix.packages }} --target ${{ matrix.target }}
 
+      - name: Collect binaries (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          for pkg in ${{ matrix.packages }}; do
+            case "$pkg" in -p) continue ;; esac
+            cp "target/${{ matrix.target }}/release/$pkg.exe" dist/
+          done
+          ls -la dist
+
       - name: Collect binaries
+        if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           # Derive the binary list from the packages this target actually builds, so the

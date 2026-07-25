@@ -26,15 +26,19 @@ ed25519-dalek = { version = "3", features = ["rand_core"] }
 if-addrs = "0.15"
 ipnet = "2"
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 ts_control = "0.4"
 ts_derp = "0.4"
 ts_keys = { version = "0.4", features = ["serde"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
 url = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# WireGuard's TUN driver. Loaded from wintun.dll at runtime, so nothing is linked in.
+wintun = "0.5"
 
 [dev-dependencies]
 webpki-roots = "1"

@@ -7,8 +7,8 @@ use mesh_core::cp::CloudflareConfig;
 use mesh_core::cpclient::{CpClient, NodeIdentity};
 use mesh_core::direct::DirectTransport;
 use mesh_core::ipc::{
-    BackhaulReport, PathReport, PeerReport, PingSample, Request, Response, StatusReport,
-    default_socket_path,
+    BackhaulReport, Listener, PathReport, PeerReport, PingSample, Request, Response, StatusReport,
+    default_endpoint,
 };
 use mesh_core::node::MeshNode;
 use mesh_core::state::{
@@ -209,7 +209,7 @@ async fn main() -> Result<()> {
     node.apply_roster(&roster.peers).await;
 
     // Bring up the kernel interface last, once we know our address and have paths to use.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     if std::env::var("MESH_TUN").map(|v| v != "0").unwrap_or(true) {
         // macOS will not let us name the interface; the kernel hands back a utunN. Asking for
         // "utun" here means "any free one" and keeps the default meaningful on both platforms.
@@ -407,14 +407,9 @@ async fn serve(
     started: Instant,
     subnet: String,
 ) -> Result<()> {
-    let sock = default_socket_path();
-    let _ = std::fs::remove_file(&sock);
-    if let Some(dir) = sock.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let listener = tokio::net::UnixListener::bind(&sock)
-        .with_context(|| format!("binding {}", sock.display()))?;
-    tracing::info!(socket = %sock.display(), "listening for meshctl");
+    let endpoint = default_endpoint();
+    let mut listener = Listener::bind(&endpoint).await?;
+    tracing::info!(endpoint, "listening for meshctl");
 
     // Surface incoming application data in the daemon log too, so the demo is visible
     // without a CLI attached.
@@ -428,12 +423,12 @@ async fn serve(
     }
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = listener.accept().await?;
         let node = node.clone();
         let ts = ts.clone();
         let subnet = subnet.clone();
         tokio::spawn(async move {
-            let (r, mut w) = stream.into_split();
+            let (r, mut w) = tokio::io::split(stream);
             let mut reader = BufReader::new(r);
             let mut line = String::new();
             if reader.read_line(&mut line).await.is_err() || line.trim().is_empty() {
