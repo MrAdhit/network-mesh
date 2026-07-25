@@ -81,6 +81,12 @@ jobs:
 
       - run: cargo build --release ${{ matrix.packages }} --target ${{ matrix.target }}
 
+      # The lint job runs the suite on Linux only, so Windows-compiled code is otherwise
+      # never executed anywhere. Running it here is the only place that happens.
+      - name: Run tests on the native target
+        if: matrix.cross == false && runner.os == 'Windows'
+        run: cargo test ${{ matrix.packages }} --target ${{ matrix.target }}
+
       - name: Collect binaries (windows)
         if: runner.os == 'Windows'
         shell: bash

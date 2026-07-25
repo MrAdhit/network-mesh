@@ -123,27 +123,48 @@ rewriting buys: the guest's 5-tuple never changes, so TCP never notices.
 
 ## Platforms
 
-`meshd` and `meshctl` run on Linux (x86_64 and aarch64) and on Apple Silicon macOS. `meshcp` is
-Linux only, deliberately: it is a server and there is no reason to run it on a laptop. Intel Macs
-are not a target.
+`meshd` and `meshctl` run on Linux (x86_64 and aarch64), Apple Silicon macOS, and Windows
+(x86_64). `meshcp` is Linux only, deliberately: it is a server and there is no reason to run it
+on a laptop. Intel Macs are not a target.
 
-The TUN layer is the only part that differs, and it differs more than it looks. Linux opens
-`/dev/net/tun`, configures it by ioctl, and carries bare IP packets. macOS has no such device: a
-utun is a socket opened against the `com.apple.net.utun_control` kernel control, the kernel
-chooses the interface number rather than accepting one, and every packet carries a four-byte
-address family header that has to be added on write and stripped on read. `tun/` hides both
-behind one type, so nothing above it knows which platform it is on.
+Two things differ by platform, and both differ more than they look.
 
-Both platforms need root for the interface. On Linux that is `CAP_NET_ADMIN` plus
-`/dev/net/tun`; on macOS it is plain `sudo`. Everything else in the daemon runs unprivileged, and
-if the interface cannot be created `meshd` logs it and carries on, reachable through `meshctl`.
+The TUN layer. Linux opens `/dev/net/tun`, configures it by ioctl, and carries bare IP packets.
+macOS has no such device: a utun is a socket opened against the `com.apple.net.utun_control`
+kernel control, the kernel chooses the interface number rather than accepting one, and every
+packet carries a four-byte address family header added on write and stripped on read. Windows
+has nothing native at all, so it borrows WireGuard's Wintun driver: no file descriptor, packets
+move through shared ring buffers, so receiving is a blocking call on its own thread feeding a
+channel rather than anything pollable. `tun/` hides all three behind one type.
+
+And the control socket. Unix gets a socket in the state directory; Windows gets a named pipe,
+because tokio has no unix-socket support there even on the builds that have `AF_UNIX`.
+
+All three platforms need privilege for the interface: `CAP_NET_ADMIN` plus `/dev/net/tun` on
+Linux, `sudo` on macOS, an elevated prompt on Windows. Everything else in the daemon runs
+unprivileged, and if the interface cannot be created `meshd` logs it and carries on, still
+reachable through `meshctl`.
+
+Windows additionally needs `wintun.dll` beside `meshd.exe`. It ships with WireGuard for Windows
+and is downloadable from wintun.net; the driver is signed by WireGuard, so nothing here needs
+signing of its own.
+
+State lives in `/var/lib/mesh` on unix and `%ProgramData%\mesh` on Windows, both overridable
+with `MESH_STATE_DIR`.
 
 `MESH_TUN_NAME` picks the interface. On macOS only a `utunN` form requests a specific unit;
-anything else, including the Linux default of `mesh0`, means "whatever is free".
+anything else, including the default `mesh0` used on Linux and Windows, means "whatever is free".
 
 ```bash
-cargo run -p mesh-core --example tuncheck   # brings up just the interface, needs sudo
+cargo run -p mesh-core --example tuncheck   # brings up just the interface, needs privilege
 ```
+
+### Verification status by platform
+
+Linux and macOS are verified end to end: the interface comes up, carries ICMP and TCP, and the
+MTU is enforced. Windows is compiled and its test suite runs in CI, but no Windows machine has
+ever run the daemon, so the Wintun adapter, the netsh invocations and the named pipe are
+unproven in practice.
 
 ## State
 
