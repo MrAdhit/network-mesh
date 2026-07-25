@@ -1,0 +1,23 @@
+[package]
+name = "meshcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mesh-core = { path = "../mesh-core" }
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+axum = "0.8"
+rusqlite = { version = "0.37", features = ["bundled"] }
+argon2 = "0.5"
+chacha20poly1305 = "0.11"
+rand = "0.10"
+base64 = "0.23"
+ipnet = "2"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots", "http2", "charset"] }

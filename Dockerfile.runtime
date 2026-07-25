@@ -1,0 +1,6 @@
+# Runtime base for meshd/meshctl. Binaries are mounted in rather than copied so the
+# build/test loop stays fast; this image only supplies the OS bits they need.
+FROM debian:trixie-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates iproute2 iputils-ping curl iptables netcat-openbsd \
+ && rm -rf /var/lib/apt/lists/*

@@ -1,0 +1,15 @@
+# Build output
+/target
+/target-linux
+
+# Every environment file holds credentials of some kind: vendor API tokens in
+# .env.secrets, enrollment keys in .env and .env.cgnat. Ignore the whole family so a new
+# variant cannot be added without also being ignored.
+.env
+.env.*
+!.env.example
+
+# Node state: device tokens, private keys, the control plane database.
+/state
+*.db
+*.sqlite

@@ -1,0 +1,83 @@
+# Control plane plus two nodes.
+#
+# Bring the control plane up first, run ./bootstrap.sh to create an account, hand it your
+# backhaul credentials and mint an enrollment key, then start the nodes.
+services:
+  meshcp:
+    image: mesh-runtime:latest
+    hostname: meshcp
+    container_name: meshcp
+    command: ["/opt/mesh/meshcp"]
+    environment:
+      MESH_CP_BIND: "0.0.0.0:8080"
+      MESH_CP_STUN_BIND: "0.0.0.0:3478"
+      MESH_CP_STUN_BIND2: "0.0.0.0:3479"
+      MESH_CP_STUN_ADVERTISE: "meshcp:3478,meshcp:3479"
+      MESH_CP_DB: /var/lib/meshcp/meshcp.db
+      # Encrypts the stored Cloudflare and Tailscale tokens. Losing it makes them unreadable.
+      MESH_CP_SECRET: ${MESH_CP_SECRET:-dev-secret-change-me}
+      MESH_LOG: "info,meshcp=debug"
+    volumes:
+      - ./target-linux/release:/opt/mesh:ro
+      - meshcp-state:/var/lib/meshcp
+    ports:
+      - "8080:8080"
+    networks: [cp]
+
+  mesh-a:
+    image: mesh-runtime:latest
+    hostname: mesh-a
+    container_name: mesh-a
+    command: ["/opt/mesh/meshd"]
+    depends_on: [meshcp]
+    environment:
+      PATH: /opt/mesh:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      MESH_NODE_NAME: mesh-a
+      MESH_STATE_DIR: /var/lib/mesh
+      MESH_CP_URL: http://meshcp:8080
+      MESH_ENROLLMENT_KEY: ${MESH_ENROLLMENT_KEY:-}
+      MESH_PROBE_INTERVAL_SECS: "2"
+      MESH_LOG: "info,mesh_core=debug"
+    volumes:
+      - ./target-linux/release:/opt/mesh:ro
+      - mesh-a-state:/var/lib/mesh
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks: [cp, lan-a]
+
+  mesh-b:
+    image: mesh-runtime:latest
+    hostname: mesh-b
+    container_name: mesh-b
+    command: ["/opt/mesh/meshd"]
+    depends_on: [meshcp]
+    environment:
+      PATH: /opt/mesh:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      MESH_NODE_NAME: mesh-b
+      MESH_STATE_DIR: /var/lib/mesh
+      MESH_CP_URL: http://meshcp:8080
+      MESH_ENROLLMENT_KEY: ${MESH_ENROLLMENT_KEY:-}
+      MESH_PROBE_INTERVAL_SECS: "2"
+      MESH_LOG: "info,mesh_core=debug"
+    volumes:
+      - ./target-linux/release:/opt/mesh:ro
+      - mesh-b-state:/var/lib/mesh
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks: [cp, lan-b]
+
+# `cp` carries control-plane traffic. lan-a and lan-b give each node its own segment.
+# Note this is NOT isolation: OrbStack does not apply Docker's inter-bridge isolation, so the
+# nodes reach each other directly (0.15ms, ICMP and UDP both). That is deliberate now, since it
+# gives discovery a real direct path to find.
+networks:
+  cp:
+  lan-a:
+  lan-b:
+
+volumes:
+  meshcp-state:
+  mesh-a-state:
+  mesh-b-state:

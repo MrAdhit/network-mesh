@@ -1,0 +1,109 @@
+# CGNAT simulation: mesh-a sits behind a masquerading router, mesh-b does not.
+#
+# Driven by ./cgnat-test.sh. The question it answers is whether a direct path still forms when
+# one side can only be reached by punching outward first.
+#
+# mesh-a is on `private` only. It shares no network with the control plane, so it has neither a
+# route nor DNS for it: it reaches everything by IP through the router, which is exactly the
+# position a CGNAT'd machine is in.
+services:
+  meshcp:
+    image: mesh-runtime:latest
+    hostname: meshcp
+    container_name: meshcp
+    command: ["/opt/mesh/meshcp"]
+    environment:
+      MESH_CP_BIND: "0.0.0.0:8080"
+      MESH_CP_STUN_BIND: "0.0.0.0:3478"
+      # Nodes are told to send STUN here. Must be the address reachable from behind the NAT.
+      # Two servers: classification needs two distinct destinations.
+      MESH_CP_STUN_ADVERTISE: "10.98.0.5:3478,10.98.0.5:3479"
+      MESH_CP_DB: /var/lib/meshcp/meshcp.db
+      MESH_CP_SECRET: ${MESH_CP_SECRET:-dev-secret-change-me}
+      MESH_LOG: "info,meshcp=debug"
+    volumes:
+      - ./target-linux/release:/opt/mesh:ro
+      - meshcp-state:/var/lib/meshcp
+    ports:
+      - "8080:8080"
+    networks:
+      cp:
+        ipv4_address: 10.98.0.5
+
+  router:
+    image: mesh-runtime:latest
+    hostname: cgnat-router
+    container_name: cgnat-router
+    command: ["sleep", "infinity"]
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    networks:
+      cp:
+        ipv4_address: 10.98.0.2
+      private:
+        ipv4_address: 10.99.0.2
+
+  mesh-a:
+    image: mesh-runtime:latest
+    hostname: mesh-a
+    container_name: mesh-a
+    # The default route has to exist before meshd starts, or enrollment fails outright.
+    command: ["sh", "-c", "ip route replace default via 10.99.0.2 && exec /opt/mesh/meshd"]
+    depends_on: [meshcp, router]
+    environment:
+      PATH: /opt/mesh:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      MESH_NODE_NAME: mesh-a
+      MESH_STATE_DIR: /var/lib/mesh
+      MESH_CP_URL: http://10.98.0.5:8080
+      MESH_ENROLLMENT_KEY: ${MESH_ENROLLMENT_KEY:-}
+      MESH_PROBE_INTERVAL_SECS: "2"
+      MESH_LOG: "info,mesh_core=debug"
+    volumes:
+      - ./target-linux/release:/opt/mesh:ro
+      - mesh-a-state:/var/lib/mesh
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      private:
+        ipv4_address: 10.99.0.10
+
+  mesh-b:
+    image: mesh-runtime:latest
+    hostname: mesh-b
+    container_name: mesh-b
+    command: ["/opt/mesh/meshd"]
+    depends_on: [meshcp]
+    environment:
+      PATH: /opt/mesh:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      MESH_NODE_NAME: mesh-b
+      MESH_STATE_DIR: /var/lib/mesh
+      MESH_CP_URL: http://10.98.0.5:8080
+      MESH_ENROLLMENT_KEY: ${MESH_ENROLLMENT_KEY:-}
+      MESH_PROBE_INTERVAL_SECS: "2"
+      MESH_LOG: "info,mesh_core=debug"
+    volumes:
+      - ./target-linux/release:/opt/mesh:ro
+      - mesh-b-state:/var/lib/mesh
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      cp:
+        ipv4_address: 10.98.0.20
+
+networks:
+  cp:
+    ipam:
+      config:
+        - subnet: 10.98.0.0/16
+  private:
+    ipam:
+      config:
+        - subnet: 10.99.0.0/16
+
+volumes:
+  meshcp-state:
+  mesh-a-state:
+  mesh-b-state:
