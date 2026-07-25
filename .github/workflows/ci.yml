@@ -88,6 +88,10 @@ jobs:
 
       - run: cargo build --release ${{ matrix.packages }} --target ${{ matrix.target }}
 
+      # Shipped with the binaries because it is the only way to exercise the TUN layer on a
+      # machine that has no control plane, which is exactly the situation on a fresh install.
+      - run: cargo build --release -p mesh-core --example tuncheck --target ${{ matrix.target }}
+
       # The lint job runs the suite on Linux only, so Windows-compiled code is otherwise never
       # executed anywhere. mesh-core explicitly, because that is where every test lives and
       # matrix.packages deliberately omits it from the Windows build.
@@ -104,6 +108,7 @@ jobs:
             case "$pkg" in -p) continue ;; esac
             cp "target/${{ matrix.target }}/release/$pkg.exe" dist/
           done
+          cp "target/${{ matrix.target }}/release/examples/tuncheck.exe" dist/
           ls -la dist
 
       - name: Collect binaries
@@ -116,6 +121,7 @@ jobs:
             case "$pkg" in -p) continue ;; esac
             cp "target/${{ matrix.target }}/release/$pkg" dist/
           done
+          cp "target/${{ matrix.target }}/release/examples/tuncheck" dist/
           # Stripped separately so a failure here is visible rather than silent.
           if [ "${{ matrix.cross }}" = "true" ]; then
             aarch64-linux-gnu-strip dist/* || true
