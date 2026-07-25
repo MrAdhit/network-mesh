@@ -123,8 +123,9 @@ rewriting buys: the guest's 5-tuple never changes, so TCP never notices.
 
 ## Platforms
 
-`meshd` and `meshctl` run on Linux and macOS. `meshcp` is Linux only, deliberately: it is a
-server and there is no reason to run it on a laptop.
+`meshd` and `meshctl` run on Linux (x86_64 and aarch64) and on Apple Silicon macOS. `meshcp` is
+Linux only, deliberately: it is a server and there is no reason to run it on a laptop. Intel Macs
+are not a target.
 
 The TUN layer is the only part that differs, and it differs more than it looks. Linux opens
 `/dev/net/tun`, configures it by ioctl, and carries bare IP packets. macOS has no such device: a
