@@ -21,6 +21,43 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+/// Consecutive rejected roster fetches before we accept that we have been removed.
+///
+/// More than one, because a single 401 could be a control plane restarting mid-request and
+/// evicting a healthy node over that would be worse than the delay.
+const REVOCATION_TOLERANCE: u32 = 3;
+
+/// Register with the control plane and persist what it gives back.
+///
+/// Used both for a first join and for rejoining after a revocation. The node keeps its Ed25519
+/// identity either way; the control plane treats enrollment as idempotent by public key, so
+/// this returns the existing record if one survives and mints a fresh one if it does not.
+async fn enroll(
+    state: &mut NodeState,
+    state_dir: &Path,
+    cp_url: &str,
+    identity: &NodeIdentity,
+    node_name: &str,
+    enrollment_key: &str,
+) -> Result<()> {
+    let client = CpClient::new(cp_url)?;
+    let resp = client.enroll(enrollment_key, identity, node_name).await?;
+    tracing::info!(
+        node_id = %resp.node_id, ip = %resp.virtual_ip, subnet = %resp.subnet,
+        "enrolled with the control plane"
+    );
+    state.control_plane = Some(ControlPlaneState {
+        url: cp_url.to_string(),
+        node_id: resp.node_id,
+        node_token: resp.node_token,
+        virtual_ip: resp.virtual_ip,
+        subnet: resp.subnet,
+        peers: Vec::new(),
+    });
+    state.save(state_dir)?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -57,29 +94,37 @@ async fn main() -> Result<()> {
         let key = boot.enrollment_key.clone().ok_or_else(|| {
             anyhow!("this node has not enrolled yet; set MESH_ENROLLMENT_KEY to join a network")
         })?;
-        let client = CpClient::new(&cp_url)?;
-        let resp = client.enroll(&key, &identity, &node_name).await?;
-        tracing::info!(
-            node_id = %resp.node_id, ip = %resp.virtual_ip, subnet = %resp.subnet,
-            "enrolled with the control plane"
-        );
-        state.control_plane = Some(ControlPlaneState {
-            url: cp_url.clone(),
-            node_id: resp.node_id,
-            node_token: resp.node_token,
-            virtual_ip: resp.virtual_ip,
-            subnet: resp.subnet,
-            peers: Vec::new(),
-        });
-        state.save(&state_dir)?;
+        enroll(&mut state, &state_dir, &cp_url, &identity, &node_name, &key).await?;
     }
 
-    let cp_state = state.control_plane.clone().expect("just enrolled");
-    let cp = Arc::new(CpClient::new(&cp_url)?.with_token(cp_state.node_token.clone()));
+    let mut cp_state = state.control_plane.clone().expect("just enrolled");
+    let mut cp = Arc::new(CpClient::new(&cp_url)?.with_token(cp_state.node_token.clone()));
 
-    // A stale roster beats no mesh at all, so a control plane outage is survivable.
+    // A stale roster beats no mesh at all, so a control plane outage is survivable. A rejected
+    // token is not the same thing and cached state cannot paper over it, so it is handled
+    // separately below.
     let (roster, fresh) = match cp.roster().await {
         Ok(r) => (r, true),
+        Err(e) if e.is_unauthorized() => {
+            // Our registration is gone, most likely revoked. Rejoining is only legitimate
+            // because it takes a currently-valid enrollment key, which is exactly the
+            // credential an operator rotates when they mean the eviction to stick. Without one
+            // this is fatal, and says so.
+            let key = boot.enrollment_key.clone().ok_or_else(|| {
+                anyhow!(
+                    "the control plane no longer recognises this node; it was probably removed. Set MESH_ENROLLMENT_KEY to rejoin, or delete {} to start clean",
+                    state_dir.display()
+                )
+            })?;
+            tracing::warn!(
+                old_node_id = %cp_state.node_id,
+                "our registration was revoked; rejoining with the enrollment key"
+            );
+            enroll(&mut state, &state_dir, &cp_url, &identity, &node_name, &key).await?;
+            cp_state = state.control_plane.clone().expect("just re-enrolled");
+            cp = Arc::new(CpClient::new(&cp_url)?.with_token(cp_state.node_token.clone()));
+            (cp.roster().await?, true)
+        }
         Err(e) => {
             tracing::warn!(error = %e, "control plane unreachable; using the cached roster");
             (
@@ -197,6 +242,10 @@ async fn main() -> Result<()> {
     state.save(&state_dir)?;
 
     let bound_port = direct.as_ref().map(|d| d.local_port);
+    // Lets the roster refresh task stop the daemon when the control plane says we are no
+    // longer a member.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     let node = MeshNode::new(
         node_name.clone(),
         identity.public_bytes(),
@@ -262,13 +311,17 @@ async fn main() -> Result<()> {
         let state_dir = state_dir.clone();
         // Report our measured region so the first node to poll settles it for the network.
         let region = ts.as_ref().map(|t| t.region_id);
+        let shutdown_tx = shutdown_tx.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(30));
+            // One 401 could be a control plane blip; a run of them is an eviction.
+            let mut rejected = 0u32;
             ticker.tick().await;
             loop {
                 ticker.tick().await;
                 match cp.roster_reporting(region).await {
                     Ok(r) => {
+                        rejected = 0;
                         node.apply_roster(&r.peers).await;
                         if let Ok(mut st) = NodeState::load(&state_dir) {
                             if let Some(c) = st.control_plane.as_mut() {
@@ -277,7 +330,29 @@ async fn main() -> Result<()> {
                             let _ = st.save(&state_dir);
                         }
                     }
-                    Err(e) => tracing::debug!(error = %e, "roster refresh failed"),
+                    Err(e) if e.is_unauthorized() => {
+                        // Deliberately not re-enrolling here. Rejoining on our own while
+                        // running would make `remove-node` meaningless: the operator would
+                        // evict a node and watch it reappear. Shutting down is what makes the
+                        // eviction real; rejoining stays a deliberate act on restart.
+                        rejected += 1;
+                        tracing::warn!(
+                            rejected,
+                            "the control plane rejected our token; this node may have been removed"
+                        );
+                        if rejected >= REVOCATION_TOLERANCE {
+                            tracing::error!(
+                                "removed from the network, shutting down. Restart with \
+                                 MESH_ENROLLMENT_KEY set to rejoin."
+                            );
+                            let _ = shutdown_tx.send(true);
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        rejected = 0;
+                        tracing::debug!(error = %e, "roster refresh failed");
+                    }
                 }
             }
         });
@@ -288,7 +363,7 @@ async fn main() -> Result<()> {
     state.direct_port_poisoned = false;
     state.save(&state_dir)?;
 
-    serve(node, ts, Instant::now(), roster.subnet.clone()).await
+    serve(node, ts, Instant::now(), roster.subnet.clone(), shutdown_rx).await
 }
 
 async fn bring_up_cloudflare(
@@ -406,6 +481,7 @@ async fn serve(
     ts: Option<Arc<TailscaleBackhaul>>,
     started: Instant,
     subnet: String,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let endpoint = default_endpoint();
     let mut listener = Listener::bind(&endpoint).await?;
@@ -428,7 +504,18 @@ async fn serve(
         // is ordinary, and losing the whole node over it would also lose both backhauls and every
         // measured path. Only a persistent failure, which means the endpoint itself is gone, is
         // worth giving up on.
-        let stream = match listener.accept().await {
+        let accepted = tokio::select! {
+            biased;
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    tracing::info!("shutting down");
+                    return Ok(());
+                }
+                continue;
+            }
+            r = listener.accept() => r,
+        };
+        let stream = match accepted {
             Ok(s) => {
                 consecutive_failures = 0;
                 s

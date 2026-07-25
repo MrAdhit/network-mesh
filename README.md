@@ -197,6 +197,15 @@ Traffic *into* a Windows node is dropped by Windows Firewall, which blocks inbou
 unidentified network by default. The mesh delivers those packets to the interface correctly, so
 this is a host firewall rule to add rather than anything to fix here.
 
+Removing a node with `meshctl remove-node` takes effect while it is running: the daemon notices
+its token is being rejected, and after three consecutive refusals it shuts down rather than
+carrying on from cached state. Restarting it with a valid `MESH_ENROLLMENT_KEY` rejoins the
+network with a fresh registration; restarting without one fails with an explanation rather than
+a puzzle.
+
+That split is deliberate. A node that rejoined by itself while running would make eviction
+meaningless, so rejoining stays a deliberate act, gated on a credential an operator can rotate.
+
 Still unverified: `meshcp` runs only on Linux by design.
 
 ## State

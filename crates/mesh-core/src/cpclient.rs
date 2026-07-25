@@ -1,6 +1,6 @@
 //! Node-side client for the control plane, plus the node's own identity.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use std::path::Path;
 
@@ -49,6 +49,39 @@ impl NodeIdentity {
     }
 }
 
+/// Why a control plane call failed, to the extent the caller should care.
+///
+/// The distinction that matters is whether the control plane answered. A network error means
+/// our cached state is still true and we should carry on with it. A rejected token means the
+/// control plane is telling us our registration no longer exists, which cached state cannot
+/// paper over.
+#[derive(Debug)]
+pub enum CpError {
+    /// The control plane answered and refused our credentials.
+    Unauthorized,
+    /// Anything else: unreachable, malformed, or a server-side failure.
+    Other(anyhow::Error),
+}
+
+impl CpError {
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self, CpError::Unauthorized)
+    }
+}
+
+impl std::fmt::Display for CpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CpError::Unauthorized => write!(f, "the control plane rejected our node token"),
+            CpError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for CpError {}
+
+// anyhow supplies From<CpError> already, via its blanket impl over std::error::Error.
+
 pub struct CpClient {
     base: String,
     http: reqwest::Client,
@@ -74,17 +107,22 @@ impl CpClient {
     async fn parse<T: serde::de::DeserializeOwned>(
         resp: reqwest::Response,
         what: &str,
-    ) -> Result<T> {
+    ) -> std::result::Result<T, CpError> {
         let status = resp.status();
-        let text = resp.text().await?;
+        let text = resp.text().await.map_err(|e| CpError::Other(e.into()))?;
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(CpError::Unauthorized);
+        }
         if !status.is_success() {
             // The control plane sends a human-readable reason; surface it rather than a code.
             let msg = serde_json::from_str::<ApiError>(&text)
                 .map(|e| e.error)
                 .unwrap_or(text);
-            bail!("{what} failed ({status}): {msg}");
+            return Err(CpError::Other(anyhow!("{what} failed ({status}): {msg}")));
         }
-        serde_json::from_str(&text).with_context(|| format!("unexpected {what} response: {text}"))
+        serde_json::from_str(&text)
+            .with_context(|| format!("unexpected {what} response: {text}"))
+            .map_err(CpError::Other)
     }
 
     pub async fn enroll(
@@ -104,20 +142,23 @@ impl CpClient {
             .send()
             .await
             .context("could not reach the control plane")?;
-        Self::parse(resp, "enrollment").await
+        Ok(Self::parse(resp, "enrollment").await?)
     }
 
-    pub async fn roster(&self) -> Result<Roster> {
+    pub async fn roster(&self) -> std::result::Result<Roster, CpError> {
         self.roster_reporting(None).await
     }
 
     /// `derp_region` tells the control plane which relay we measured as closest. It is only
     /// used if the network has not agreed on one yet.
-    pub async fn roster_reporting(&self, derp_region: Option<u32>) -> Result<Roster> {
+    pub async fn roster_reporting(
+        &self,
+        derp_region: Option<u32>,
+    ) -> std::result::Result<Roster, CpError> {
         let token = self
             .node_token
             .as_ref()
-            .ok_or_else(|| anyhow!("no node token; enroll first"))?;
+            .ok_or_else(|| CpError::Other(anyhow!("no node token; enroll first")))?;
         let url = match derp_region {
             Some(r) => format!("{}/v1/roster?derp={r}", self.base),
             None => format!("{}/v1/roster", self.base),
@@ -128,7 +169,7 @@ impl CpClient {
             .header(NODE_TOKEN_HEADER, token)
             .send()
             .await
-            .context("could not reach the control plane")?;
+            .map_err(|e| CpError::Other(anyhow!("could not reach the control plane: {e}")))?;
         Self::parse(resp, "roster fetch").await
     }
 
