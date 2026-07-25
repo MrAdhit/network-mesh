@@ -56,8 +56,16 @@ impl TunDevice {
                 .map_err(|e| anyhow!("starting the Wintun session: {e}"))?,
         );
 
-        // netsh rather than the crate's helpers: the same three commands as the unix platforms,
-        // and a failure names the command rather than an HRESULT.
+        // netsh rather than the crate's helpers: the same shape as the unix platforms, and a
+        // failure names the command rather than an HRESULT.
+        //
+        // The mask is the mesh subnet's, not /32. With the real mask Windows installs the
+        // on-link route for the whole subnet by itself, which is what we want anyway; a /32
+        // would leave the interface with no route at all and make everything depend on the
+        // separate `add route` below landing.
+        let net: ipnet::Ipv4Net = subnet
+            .parse()
+            .with_context(|| format!("{subnet} is not a valid IPv4 subnet"))?;
         let addr = address.to_string();
         run(
             "netsh",
@@ -69,7 +77,7 @@ impl TunDevice {
                 &format!("name={name}"),
                 "source=static",
                 &format!("address={addr}"),
-                "mask=255.255.255.255",
+                &format!("mask={}", net.netmask()),
             ],
         )?;
         run(
@@ -84,15 +92,21 @@ impl TunDevice {
                 "store=active",
             ],
         )?;
-        // Adding a route that already exists is an error, so clear it first and ignore that.
-        let _ = run(
+        // Belt and braces. Setting the address above should already have produced the on-link
+        // route, so this is allowed to fail rather than aborting startup over a duplicate.
+        if let Err(e) = run(
             "netsh",
-            &["interface", "ipv4", "delete", "route", subnet, name],
-        );
-        run(
-            "netsh",
-            &["interface", "ipv4", "add", "route", subnet, name],
-        )?;
+            &[
+                "interface",
+                "ipv4",
+                "add",
+                "route",
+                &format!("prefix={subnet}"),
+                &format!("interface={name}"),
+            ],
+        ) {
+            tracing::debug!(error = %e, "explicit route not added; the on-link one should cover it");
+        }
 
         // Wintun blocks to receive and has no pollable handle, so a thread does the waiting and
         // the channel is what async code awaits. Bounded, so a stalled reader applies back
