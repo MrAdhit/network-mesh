@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 
@@ -27,7 +28,16 @@ pub struct PeerNode {
 }
 
 pub struct TailscaleBackhaul {
-    derp: Arc<ts_derp::DefaultClient>,
+    /// Swappable, because a DERP connection dies and has to be replaced.
+    ///
+    /// Without this a broken pipe left the relay permanently down: every send failed forever
+    /// and the path never recovered, which quietly turns a three-path mesh into a two-path one.
+    derp: RwLock<Arc<ts_derp::DefaultClient>>,
+    /// What it takes to build a replacement.
+    servers: Vec<ts_derp::ServerConnInfo>,
+    node_keys: ts_keys::NodeKeyPair,
+    /// Held across a reconnect so a dozen failing callers produce one new connection.
+    reconnecting: tokio::sync::Mutex<()>,
     pub self_node_key: NodePublicKey,
     pub self_addrs: Vec<IpAddr>,
     pub region: String,
@@ -227,7 +237,10 @@ impl TailscaleBackhaul {
             .map_err(|e| anyhow!("derp connect to region {} failed: {e}", region.info.code))?;
 
         Ok(Self {
-            derp: Arc::new(derp),
+            derp: RwLock::new(Arc::new(derp)),
+            servers: region.servers.clone(),
+            node_keys: keys.node_keys.clone(),
+            reconnecting: Default::default(),
             self_node_key: keys.node_keys.public,
             self_addrs,
             region: region.info.code.clone(),
@@ -239,6 +252,25 @@ impl TailscaleBackhaul {
 
     pub async fn peers(&self) -> Vec<PeerNode> {
         self.peers.read().await.values().cloned().collect()
+    }
+
+    /// Every node currently claiming this hostname, best guess first.
+    ///
+    /// More than one is normal: an ephemeral node lingers after it stops, and Tailscale gives
+    /// the replacement a `-1` suffix, so a restarted peer has two entries and both may still
+    /// report online. Rather than guess which is live, callers send to all of them until traffic
+    /// teaches us the right key. A packet to a dead key is dropped by the relay and costs
+    /// nothing; picking wrong silently costs the whole path.
+    pub async fn peer_node_keys(&self, hostname: &str) -> Vec<NodePublicKey> {
+        let peers = self.peers.read().await;
+        let mut matches: Vec<&PeerNode> = peers
+            .values()
+            .filter(|p| hostname_matches(&p.hostname, hostname))
+            .collect();
+        // Most recently seen first: after a restart the live node is the one with fresh traffic,
+        // and it is often the one holding the deduplicated name rather than the original.
+        matches.sort_by_key(|p| (!p.online, std::cmp::Reverse(p.id)));
+        matches.iter().map(|p| p.node_key).collect()
     }
 
     /// Resolve a hostname to a node, preferring one that is online.
@@ -264,24 +296,60 @@ impl TailscaleBackhaul {
     }
 
     pub async fn send_to(&self, peer: &NodePublicKey, msg: &[u8]) -> Result<()> {
-        self.derp
-            .send_one(*peer, msg)
-            .await
-            .map_err(|e| anyhow!("derp send failed: {e}"))
+        let client = self.derp.read().await.clone();
+        match client.send_one(*peer, msg).await {
+            Ok(()) => Ok(()),
+            Err(first) => {
+                // One retry across a fresh connection. A relay that dropped us mid-send is
+                // ordinary; giving up on it permanently is not.
+                self.reconnect(&client).await;
+                let client = self.derp.read().await.clone();
+                client
+                    .send_one(*peer, msg)
+                    .await
+                    .map_err(|e| anyhow!("derp send failed after reconnect: {e} (first: {first})"))
+            }
+        }
     }
 
-    /// Blocks until a peer relays us something.
+    /// Blocks until a peer relays us something, reconnecting as needed.
     pub async fn recv(&self) -> Result<(NodePublicKey, Vec<u8>)> {
-        let (src, pkt) = self
-            .derp
-            .recv_one()
-            .await
-            .map_err(|e| anyhow!("derp recv failed: {e}"))?;
-        Ok((src, pkt.to_vec()))
+        loop {
+            let client = self.derp.read().await.clone();
+            match client.recv_one().await {
+                Ok((src, pkt)) => return Ok((src, pkt.to_vec())),
+                Err(e) => {
+                    tracing::warn!(error = %e, "derp receive failed; reconnecting");
+                    self.reconnect(&client).await;
+                }
+            }
+        }
     }
 
-    pub fn derp_client(&self) -> Arc<ts_derp::DefaultClient> {
-        self.derp.clone()
+    /// Replace the DERP connection, unless someone else already did.
+    ///
+    /// `stale` is the connection the caller found broken. If the stored one is no longer that
+    /// connection, another task has already reconnected and this is a no-op, which is what
+    /// stops a burst of failures becoming a burst of connections.
+    async fn reconnect(&self, stale: &Arc<ts_derp::DefaultClient>) {
+        let _guard = self.reconnecting.lock().await;
+        if !Arc::ptr_eq(&*self.derp.read().await, stale) {
+            return;
+        }
+        for attempt in 1..=5u32 {
+            match ts_derp::DefaultClient::connect(self.servers.iter(), &self.node_keys).await {
+                Ok(fresh) => {
+                    *self.derp.write().await = Arc::new(fresh);
+                    tracing::info!(attempt, "derp reconnected");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(attempt, error = %e, "derp reconnect failed");
+                    tokio::time::sleep(Duration::from_secs(1 << attempt.min(4))).await;
+                }
+            }
+        }
+        tracing::error!("gave up reconnecting to derp; the relay path stays down until restart");
     }
 }
 

@@ -188,8 +188,16 @@ plane, both backhauls up, and a direct path punched to two Linux containers, one
 a simulated CGNAT. The direct path won at about 1ms against 33ms via Cloudflare and 99ms via
 DERP.
 
-Still unverified: `meshcp` runs only on Linux by design, and no Windows node has yet carried
-traffic over its TUN interface, since the pipe test ran with `MESH_TUN=0`.
+Windows is verified end to end too. A node there brings up a Wintun adapter with the right
+address, mask, MTU and on-link route, and carries ICMP over the mesh to Linux containers at
+around 1ms on the direct path with no loss. The 1100 MTU is enforced: 1000 bytes with DF passes,
+1200 comes back as "Packet needs to be fragmented but DF set".
+
+Traffic *into* a Windows node is dropped by Windows Firewall, which blocks inbound ICMP on an
+unidentified network by default. The mesh delivers those packets to the interface correctly, so
+this is a host firewall rule to add rather than anything to fix here.
+
+Still unverified: `meshcp` runs only on Linux by design.
 
 ## State
 

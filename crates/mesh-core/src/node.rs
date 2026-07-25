@@ -328,18 +328,28 @@ impl MeshNode {
                     .await
                     .get(peer)
                     .and_then(|p| p.ts_node_key);
-                let key = match learned {
-                    Some(k) => k,
+                match learned {
+                    // Once traffic has told us the real key, use it and nothing else.
+                    Some(k) => ts.send_to(&k, &bytes).await?,
                     None => {
-                        ts.peer_by_hostname(&hostname)
-                            .await
-                            .ok_or_else(|| {
-                                anyhow!("peer {hostname} is not in the tailscale netmap")
-                            })?
-                            .node_key
+                        // Bootstrap: a hostname can match several nodes, and the live one is not
+                        // reliably identifiable from the netmap. Send to all of them and let the
+                        // reply tell us which was right.
+                        let keys = ts.peer_node_keys(&hostname).await;
+                        if keys.is_empty() {
+                            bail!("peer {hostname} is not in the tailscale netmap");
+                        }
+                        let mut sent = false;
+                        for k in keys {
+                            if ts.send_to(&k, &bytes).await.is_ok() {
+                                sent = true;
+                            }
+                        }
+                        if !sent {
+                            bail!("no reachable tailscale node for {hostname}");
+                        }
                     }
-                };
-                ts.send_to(&key, &bytes).await?;
+                }
             }
         }
         Ok(())
