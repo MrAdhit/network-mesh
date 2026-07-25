@@ -14,12 +14,9 @@ use anyhow::{Context, Result, bail};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use tokio::io::unix::AsyncFd;
 
-use super::{MTU, run};
+use super::{MTU, UTUN_HEADER_LEN, run, utun_frame, utun_strip, utun_unit};
 
 const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
-/// The four-byte header on every utun packet: AF_INET, network byte order.
-const AF_INET_HEADER: [u8; 4] = [0, 0, 0, libc::AF_INET as u8];
-const HEADER_LEN: usize = 4;
 
 pub struct TunDevice {
     fd: AsyncFd<OwnedFd>,
@@ -33,12 +30,7 @@ impl TunDevice {
     /// including the `mesh0` we use on Linux, asks the kernel for whatever is free, because
     /// macOS will not let us name the interface ourselves.
     pub fn open(requested: &str, address: std::net::Ipv4Addr, subnet: &str) -> Result<Self> {
-        let unit = requested
-            .strip_prefix("utun")
-            .and_then(|n| n.parse::<u32>().ok())
-            // sc_unit is 1-based: unit 1 is utun0. Zero asks for any free one.
-            .map(|n| n + 1)
-            .unwrap_or(0);
+        let unit = utun_unit(requested);
 
         let raw: RawFd =
             unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) };
@@ -142,7 +134,7 @@ impl TunDevice {
     pub async fn recv(&self) -> Result<Vec<u8>> {
         loop {
             let mut guard = self.fd.readable().await?;
-            let mut buf = vec![0u8; MTU as usize + 64 + HEADER_LEN];
+            let mut buf = vec![0u8; MTU as usize + 64 + UTUN_HEADER_LEN];
             let res = guard.try_io(|inner| {
                 let n = unsafe {
                     libc::read(
@@ -159,12 +151,11 @@ impl TunDevice {
             });
             match res {
                 Ok(Ok(n)) => {
-                    if n <= HEADER_LEN {
-                        continue; // header only, nothing to forward
-                    }
                     buf.truncate(n);
-                    buf.drain(..HEADER_LEN);
-                    return Ok(buf);
+                    match utun_strip(&buf) {
+                        Some(pkt) => return Ok(pkt.to_vec()),
+                        None => continue, // header only, nothing to forward
+                    }
                 }
                 Ok(Err(e)) => return Err(e.into()),
                 Err(_would_block) => continue,
@@ -176,9 +167,7 @@ impl TunDevice {
     pub async fn send(&self, packet: &[u8]) -> Result<()> {
         // IPv6 would need AF_INET6 here; the mesh is IPv4 only for now and node.rs drops
         // anything else before it reaches this point.
-        let mut framed = Vec::with_capacity(HEADER_LEN + packet.len());
-        framed.extend_from_slice(&AF_INET_HEADER);
-        framed.extend_from_slice(packet);
+        let framed = utun_frame(packet);
 
         loop {
             let mut guard = self.fd.writable().await?;

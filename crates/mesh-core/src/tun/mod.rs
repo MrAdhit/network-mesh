@@ -51,6 +51,43 @@ pub(crate) fn run(cmd: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// The four-byte header macOS puts in front of every utun packet: an address family in
+/// network byte order.
+///
+/// Lives here rather than in the macOS module so it is compiled and tested on every platform.
+/// It is the part of the utun path most likely to be subtly wrong, and the part a unit test can
+/// actually reach without a kernel interface.
+pub(crate) const UTUN_AF_INET_HEADER: [u8; 4] = [0, 0, 0, 2];
+pub(crate) const UTUN_HEADER_LEN: usize = 4;
+
+/// Prefix a packet with the utun address family header.
+pub(crate) fn utun_frame(packet: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(UTUN_HEADER_LEN + packet.len());
+    out.extend_from_slice(&UTUN_AF_INET_HEADER);
+    out.extend_from_slice(packet);
+    out
+}
+
+/// Strip that header. `None` when there is nothing behind it.
+pub(crate) fn utun_strip(buf: &[u8]) -> Option<&[u8]> {
+    if buf.len() <= UTUN_HEADER_LEN {
+        return None;
+    }
+    Some(&buf[UTUN_HEADER_LEN..])
+}
+
+/// Turn a requested interface name into a utun unit number.
+///
+/// `sc_unit` is 1-based, so utun0 is unit 1. Zero asks the kernel for whatever is free, which
+/// is what any name that is not `utunN` means, including the `mesh0` we use on Linux.
+pub(crate) fn utun_unit(requested: &str) -> u32 {
+    requested
+        .strip_prefix("utun")
+        .and_then(|n| n.parse::<u32>().ok())
+        .map(|n| n + 1)
+        .unwrap_or(0)
+}
+
 /// Destination address of an IPv4 packet, if it is one.
 pub fn ipv4_destination(packet: &[u8]) -> Option<std::net::Ipv4Addr> {
     if packet.len() < 20 || packet[0] >> 4 != 4 {
@@ -86,5 +123,45 @@ mod tests {
         assert!(ipv4_destination(&[]).is_none());
         assert!(ipv4_destination(&[0x60; 40]).is_none(), "ipv6 is not ipv4");
         assert!(ipv4_destination(&[0x45; 4]).is_none(), "too short");
+    }
+
+    #[test]
+    fn utun_framing_round_trips() {
+        let pkt = crate::ip::build_udp4(
+            std::net::Ipv4Addr::new(10, 201, 0, 2),
+            std::net::Ipv4Addr::new(10, 201, 0, 3),
+            1000,
+            2000,
+            b"payload",
+            1,
+        );
+        let framed = utun_frame(&pkt);
+        assert_eq!(&framed[..4], &UTUN_AF_INET_HEADER, "AF_INET, network order");
+        assert_eq!(framed.len(), pkt.len() + 4);
+        assert_eq!(utun_strip(&framed), Some(pkt.as_slice()));
+        // The whole point: what comes back out is a packet the rest of the stack understands.
+        assert_eq!(
+            ipv4_destination(utun_strip(&framed).unwrap()),
+            Some(std::net::Ipv4Addr::new(10, 201, 0, 3))
+        );
+    }
+
+    #[test]
+    fn a_header_with_nothing_behind_it_is_not_a_packet() {
+        assert!(utun_strip(&[]).is_none());
+        assert!(utun_strip(&UTUN_AF_INET_HEADER).is_none());
+        assert!(utun_strip(&[0, 0, 0, 2, 0x45]).is_some());
+    }
+
+    #[test]
+    fn utun_unit_numbers_are_one_based() {
+        // utun0 is unit 1; the off-by-one here would silently open the wrong interface.
+        assert_eq!(utun_unit("utun0"), 1);
+        assert_eq!(utun_unit("utun7"), 8);
+        // Anything else means "kernel picks".
+        assert_eq!(utun_unit("utun"), 0);
+        assert_eq!(utun_unit("mesh0"), 0);
+        assert_eq!(utun_unit("utunX"), 0);
+        assert_eq!(utun_unit(""), 0);
     }
 }
