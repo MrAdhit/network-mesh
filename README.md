@@ -147,7 +147,17 @@ reachable through `meshctl`.
 
 Windows additionally needs `wintun.dll` beside `meshd.exe`. It ships with WireGuard for Windows
 and is downloadable from wintun.net; the driver is signed by WireGuard, so nothing here needs
-signing of its own.
+signing of its own. The Visual C++ runtime is linked statically, so no redistributable is
+required: the binaries are self-contained apart from that one DLL.
+
+**Windows Firewall blocks inbound traffic on the mesh interface by default.** Nothing arrives
+until a rule permits it, and the failure is silent from the application's side: packets leave,
+nothing comes back, and no error appears anywhere. `meshd` does not add rules to your firewall.
+For ICMP, which is what the usual first test uses:
+
+```
+netsh advfirewall firewall add rule name="mesh-icmp" protocol=icmpv4:8,any dir=in action=allow
+```
 
 State lives in `/var/lib/mesh` on unix and `%ProgramData%\mesh` on Windows, both overridable
 with `MESH_STATE_DIR`.
@@ -161,10 +171,16 @@ cargo run -p mesh-core --example tuncheck   # brings up just the interface, need
 
 ### Verification status by platform
 
-Linux and macOS are verified end to end: the interface comes up, carries ICMP and TCP, and the
-MTU is enforced. Windows is compiled and its test suite runs in CI, but no Windows machine has
-ever run the daemon, so the Wintun adapter, the netsh invocations and the named pipe are
-unproven in practice.
+Linux, macOS and Windows are all verified end to end: the interface comes up, carries traffic,
+and the MTU is enforced (a 1000-byte payload with DF set passes, 1200 is refused). Linux and
+macOS additionally carry TCP.
+
+Windows was verified on ARM64 Windows 11, which is what an Apple Silicon VM runs. The x64 build
+cannot stand in for it: `wintun.dll` embeds a kernel driver matching its own architecture, so an
+emulated x64 process cannot install the ARM64 one it would need.
+
+Still unverified anywhere: `meshcp` runs only on Linux by design, and the Windows named pipe has
+been compiled but not exercised between a real `meshd` and `meshctl`.
 
 ## State
 
