@@ -121,6 +121,48 @@ dropping UDP 47778 moves the winner to Cloudflare and latency from 0.2ms to 35ms
 stream keeps going with no gap and no reconnect. That is what encapsulating rather than
 rewriting buys: the guest's 5-tuple never changes, so TCP never notices.
 
+## Updating itself
+
+The control plane carries the binaries it expects its nodes to be running, and nodes replace
+themselves when what they are running does not match. Identity is a SHA-256 of the file rather
+than a version string: a version is a claim, a hash is the thing itself, and it cannot drift from
+what was actually shipped.
+
+`build.rs` compiles the binaries into `meshcp` from `dist/<target triple>/<binary>`, hashing each
+one at build time, and serves them:
+
+```
+GET /v1/updates/<target>          what this control plane holds, with hashes
+GET /v1/updates/<target>/<name>   the bytes
+```
+
+Both are unauthenticated. They are the same binaries a release page would hand to anyone, they
+contain no account data, and requiring a token would stop the CLI updating itself before its user
+has logged in. A control plane built with nothing staged answers with an empty list, which is what
+a development build should do; CI stages the whole build matrix and compiles it in afterwards,
+which is why `meshcp` is built in its own job rather than alongside the node binaries.
+
+The daemon checks at startup and every six hours, and updates the CLI beside it as well, because
+the two are shipped as a pair and only the daemon runs continuously enough to notice. The CLI has
+`meshctl update` for doing it on demand, and otherwise only looks at the manifest, at most once
+every six hours, and prints a line if it is behind. Downloading fifteen megabytes because somebody
+ran `meshctl peers` would be rude.
+
+Nothing is ever written over a running binary. The download lands beside it and is renamed into
+place only once its hash matches, so an interrupted update leaves the old binary untouched rather
+than a half-written one that no longer starts. The new code takes effect on the next start:
+restarting a daemon out from under a working mesh to apply an update nobody asked for is worse
+than waiting.
+
+It is compiled in by default. Build with `MESH_AUTOUPDATE=0` to ship binaries that never update,
+and set the same variable at runtime to override whichever way they were built, in either
+direction. An operator saying no now outranks a decision taken at build time, and it is the only
+way to stop a node updating without rebuilding it.
+
+```bash
+MESH_AUTOUPDATE=0 cargo build --release -p meshd -p meshctl
+```
+
 ## Platforms
 
 `meshd` and `meshctl` run on Linux (x86_64 and aarch64), Apple Silicon macOS, and Windows

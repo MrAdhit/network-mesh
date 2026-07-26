@@ -296,6 +296,44 @@ async fn main() -> Result<()> {
         .unwrap_or(2);
     node.start(Duration::from_secs(interval));
 
+    // Keep this machine's binaries current. The daemon does the CLI as well as itself: they are
+    // shipped as a pair and a user expects them to match, but only the daemon runs continuously
+    // enough to notice a new build. Neither takes effect until the next start; swapping a
+    // running daemon out from under a working mesh to apply an update nobody asked for would be
+    // a poor trade.
+    if mesh_core::update::enabled_from_env() {
+        let cp_url = cp_url.clone();
+        tokio::spawn(async move {
+            // Clear a predecessor left by a previous Windows update, now that nothing runs it.
+            if let Ok(exe) = std::env::current_exe() {
+                mesh_core::update::sweep_replaced_binary(&exe);
+            }
+            let mut ticker = tokio::time::interval(Duration::from_secs(6 * 3600));
+            loop {
+                ticker.tick().await;
+                let Ok(exe) = std::env::current_exe() else {
+                    continue;
+                };
+                let mut targets = vec![("meshd", exe.clone())];
+                if let Some(ctl) = mesh_core::update::sibling(&exe, "meshctl") {
+                    targets.push(("meshctl", ctl));
+                }
+                for (name, path) in targets {
+                    match mesh_core::update::update_binary(&cp_url, name, &path).await {
+                        Ok(mesh_core::update::Outcome::Replaced { sha256 }) => tracing::info!(
+                            binary = name, %sha256,
+                            "updated on disk; takes effect on the next start"
+                        ),
+                        Ok(o) => tracing::debug!(binary = name, ?o, "update check"),
+                        Err(e) => tracing::debug!(binary = name, error = %e, "update check failed"),
+                    }
+                }
+            }
+        });
+    } else {
+        tracing::debug!("automatic updates are switched off");
+    }
+
     // Adopt whichever relays failed to come up, once they can. Without this a node that started
     // during an outage would run direct-only for the rest of its life, which is exactly the
     // "recovers on its own" property the reconnect logic exists to provide; the only difference

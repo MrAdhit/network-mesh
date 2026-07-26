@@ -1,6 +1,6 @@
 //! meshctl: talks to meshd over its unix socket.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use mesh_core::ipc::{Request, Response, call, default_endpoint};
 
 const USAGE: &str = "\
@@ -23,10 +23,14 @@ NETWORK (talks to the control plane):
     meshctl nodes                       every node, its address and whether it is up
     meshctl remove-node <node-id>
 
+SELF:
+    meshctl update                      replace local binaries with the control plane's
+
 ENVIRONMENT:
     MESH_SOCKET    daemon endpoint (unix: a socket path, windows: a named pipe)
     MESH_CP_URL    control plane base URL; overrides the one compiled in
     MESH_SESSION   session token; `login` and `signup` print one to export
+    MESH_AUTOUPDATE  set to 0 to switch off update checks entirely
 ";
 
 #[tokio::main]
@@ -52,6 +56,16 @@ async fn main() -> Result<()> {
     ) {
         return control_plane(&args).await;
     }
+
+    if args[0] == "update" {
+        return self_update().await;
+    }
+
+    // A cheap look at what the control plane holds, throttled hard so it costs nothing on a
+    // normal invocation. Only the manifest is fetched, never a binary: silently downloading
+    // fifteen megabytes because somebody ran `meshctl peers` would be rude, and on a machine
+    // with a daemon the daemon has already handled it.
+    notice_if_stale().await;
 
     let endpoint = default_endpoint();
     let req = match args[0].as_str() {
@@ -218,6 +232,84 @@ async fn unwrap_cp<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> R
         bail!("{msg}");
     }
     Ok(serde_json::from_str(&text)?)
+}
+
+/// Bring the local binaries up to date, on request.
+///
+/// Does the daemon too when it sits beside us and we can write to it, because they are shipped
+/// as a pair and running mismatched halves is its own class of confusing.
+async fn self_update() -> Result<()> {
+    if !mesh_core::update::enabled_from_env() {
+        println!("automatic updates are switched off (MESH_AUTOUPDATE)");
+        return Ok(());
+    }
+    let url = cp_url();
+    let exe = std::env::current_exe().context("finding our own path")?;
+    mesh_core::update::sweep_replaced_binary(&exe);
+
+    let mut work = vec![("meshctl", exe.clone())];
+    if let Some(d) = mesh_core::update::sibling(&exe, "meshd") {
+        work.push(("meshd", d));
+    }
+    for (name, path) in work {
+        match mesh_core::update::update_binary(&url, name, &path).await {
+            Ok(mesh_core::update::Outcome::Replaced { sha256 }) => {
+                println!("{name}  updated to {}", &sha256[..12]);
+                if name == "meshd" {
+                    println!("        restart the daemon to run it");
+                }
+            }
+            Ok(mesh_core::update::Outcome::UpToDate) => println!("{name}  already current"),
+            Ok(mesh_core::update::Outcome::NotOffered) => {
+                println!(
+                    "{name}  the control plane has no build for {}",
+                    mesh_core::update::TARGET
+                )
+            }
+            Ok(mesh_core::update::Outcome::Disabled) => {}
+            Err(e) => println!("{name}  {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// How long between the background checks that only print a notice.
+const NOTICE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+async fn notice_if_stale() {
+    if !mesh_core::update::enabled_from_env() {
+        return;
+    }
+    // The marker lives in the temp directory because it is worthless if lost and because the
+    // state directory belongs to root, which the CLI usually is not.
+    let marker = std::env::temp_dir().join("mesh-update-check");
+    if let Ok(m) = std::fs::metadata(&marker)
+        && let Ok(age) = m
+            .modified()
+            .and_then(|t| t.elapsed().map_err(std::io::Error::other))
+        && age < NOTICE_INTERVAL
+    {
+        return;
+    }
+    let _ = std::fs::write(&marker, b"");
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Ok(manifest) =
+        mesh_core::update::fetch_manifest(&cp_url(), mesh_core::update::TARGET).await
+    else {
+        return; // offline, or a control plane that serves no updates: not worth a word
+    };
+    let (Some(want), Ok(have)) = (
+        manifest.get("meshctl"),
+        mesh_core::update::sha256_file(&exe),
+    ) else {
+        return;
+    };
+    if want.sha256 != have {
+        eprintln!("a newer meshctl is available; run `meshctl update`");
+    }
 }
 
 async fn control_plane(args: &[String]) -> Result<()> {

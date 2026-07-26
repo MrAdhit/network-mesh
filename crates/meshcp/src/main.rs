@@ -6,6 +6,7 @@
 mod crypto;
 mod db;
 mod provision;
+mod updates;
 
 use anyhow::Result;
 use axum::{
@@ -510,6 +511,9 @@ async fn main() -> Result<()> {
         .route("/v1/enroll", post(enroll))
         .route("/v1/roster", get(roster))
         .route("/v1/nodes/me/tailscale-auth-key", post(tailscale_auth_key))
+        // Unauthenticated on purpose; see the module comment.
+        .route("/v1/updates/{target}", get(updates::manifest))
+        .route("/v1/updates/{target}/{name}", get(updates::download))
         .with_state(app);
 
     // Two responders on different ports. A node compares what each reports: same port from both
@@ -531,7 +535,7 @@ async fn main() -> Result<()> {
 
     let bind = std::env::var("MESH_CP_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    tracing::info!(%bind, db = %path, "control plane listening");
+    tracing::info!(%bind, db = %path, updates = %updates::describe(), "control plane listening");
     axum::serve(listener, router).await?;
     Ok(())
 }

@@ -13,3 +13,6 @@
 /state
 *.db
 *.sqlite
+
+# Node binaries staged for embedding into the control plane.
+dist/
