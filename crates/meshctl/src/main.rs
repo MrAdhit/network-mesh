@@ -25,7 +25,7 @@ NETWORK (talks to the control plane):
 
 ENVIRONMENT:
     MESH_SOCKET    daemon endpoint (unix: a socket path, windows: a named pipe)
-    MESH_CP_URL    control plane base URL
+    MESH_CP_URL    control plane base URL; overrides the one compiled in
     MESH_SESSION   session token; `login` and `signup` print one to export
 ";
 
@@ -188,8 +188,14 @@ fn fmt_ms(v: Option<f64>) -> String {
 
 // ---- control plane ----
 
+/// Same precedence as the daemon, minus the enrollment step: meshctl has no registration of
+/// its own, so it is the runtime environment, then whatever was baked in, then a local
+/// control plane for development.
 fn cp_url() -> String {
-    std::env::var("MESH_CP_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into())
+    let runtime = std::env::var("MESH_CP_URL").ok();
+    mesh_core::state::resolve_cp_url(runtime.as_deref(), None, mesh_core::state::COMPILED_CP_URL)
+        .map(|(url, _)| url)
+        .unwrap_or_else(|| "http://127.0.0.1:8080".into())
 }
 
 fn session() -> Result<String> {

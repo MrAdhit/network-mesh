@@ -28,6 +28,12 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    env:
+      # Baked into the artifacts so a downloaded binary knows where to enrol with no
+      # configuration. Runtime MESH_CP_URL still overrides it, and a node that has already
+      # enrolled keeps talking to whatever it enrolled against. Deliberately not set on the
+      # check job, so the tests keep exercising the unset path.
+      MESH_CP_URL: https://mesh.mradhit.net
     strategy:
       fail-fast: false
       matrix:

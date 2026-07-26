@@ -12,7 +12,8 @@ use mesh_core::ipc::{
 };
 use mesh_core::node::MeshNode;
 use mesh_core::state::{
-    Bootstrap, CloudflareState, ControlPlaneState, NodeState, default_state_dir,
+    Bootstrap, COMPILED_CP_URL, CloudflareState, ControlPlaneState, NodeState, default_state_dir,
+    resolve_cp_url,
 };
 use mesh_core::tailscale::TailscaleBackhaul;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -84,11 +85,17 @@ async fn main() -> Result<()> {
     tracing::info!(public_key = %identity.public_b64(), "node identity");
 
     // --- control plane: enroll once, then fetch the roster ---
-    let cp_url = boot
-        .cp_url
-        .clone()
-        .or_else(|| state.control_plane.as_ref().map(|c| c.url.clone()))
-        .ok_or_else(|| anyhow!("MESH_CP_URL is not set and this node has never enrolled"))?;
+    let (cp_url, cp_url_source) = resolve_cp_url(
+        boot.cp_url.as_deref(),
+        state.control_plane.as_ref().map(|c| c.url.as_str()),
+        COMPILED_CP_URL,
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "no control plane to talk to: set MESH_CP_URL, or build with it set to bake in a              default"
+        )
+    })?;
+    tracing::info!(url = %cp_url, source = %cp_url_source, "control plane");
 
     if state.control_plane.is_none() {
         let key = boot.enrollment_key.clone().ok_or_else(|| {

@@ -113,6 +113,13 @@ impl NodeState {
 }
 
 /// Credentials supplied by the user, from env or the CLI.
+/// The control plane a binary was built to talk to, if it was built for a particular one.
+///
+/// Set `MESH_CP_URL` when compiling and it is baked in, so a downloaded binary knows where to
+/// enrol with no configuration at all. Left unset it is `None`, which is what local development
+/// builds want. Runtime environment still wins over it either way; see `resolve_cp_url`.
+pub const COMPILED_CP_URL: Option<&str> = option_env!("MESH_CP_URL");
+
 /// What the operator supplies on the command line or in the environment.
 ///
 /// Backhaul credentials used to live here. They now come from the control plane, so a node only
@@ -130,5 +137,86 @@ impl Bootstrap {
             cp_url: get("MESH_CP_URL"),
             enrollment_key: get("MESH_ENROLLMENT_KEY"),
         }
+    }
+}
+
+/// Where a node should look for its control plane, and why.
+///
+/// The order matters and is not arbitrary:
+///
+/// 1. the runtime environment, because an operator overriding it means it now
+/// 2. what we already enrolled against, because that is where our registration actually lives
+///    and a rebuilt binary pointing somewhere else must not silently orphan a working node
+/// 3. whatever was baked in at build time, which is the answer for a fresh install
+pub fn resolve_cp_url(
+    runtime: Option<&str>,
+    cached: Option<&str>,
+    compiled: Option<&str>,
+) -> Option<(String, CpUrlSource)> {
+    let pick = |v: &str, src| {
+        let v = v.trim();
+        (!v.is_empty()).then(|| (v.to_string(), src))
+    };
+    runtime
+        .and_then(|v| pick(v, CpUrlSource::Environment))
+        .or_else(|| cached.and_then(|v| pick(v, CpUrlSource::Enrollment)))
+        .or_else(|| compiled.and_then(|v| pick(v, CpUrlSource::CompiledIn)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpUrlSource {
+    Environment,
+    Enrollment,
+    CompiledIn,
+}
+
+impl std::fmt::Display for CpUrlSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Environment => "MESH_CP_URL",
+            Self::Enrollment => "previous enrollment",
+            Self::CompiledIn => "compiled in",
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_beats_everything() {
+        let got = resolve_cp_url(
+            Some("http://run"),
+            Some("http://cached"),
+            Some("http://built"),
+        );
+        assert_eq!(got, Some(("http://run".into(), CpUrlSource::Environment)));
+    }
+
+    #[test]
+    fn an_enrolled_node_ignores_a_rebuilt_default() {
+        // A binary rebuilt against a different control plane must not orphan a node that is
+        // already registered somewhere else.
+        let got = resolve_cp_url(None, Some("http://cached"), Some("http://built"));
+        assert_eq!(got, Some(("http://cached".into(), CpUrlSource::Enrollment)));
+    }
+
+    #[test]
+    fn a_fresh_install_uses_what_was_baked_in() {
+        let got = resolve_cp_url(None, None, Some("http://built"));
+        assert_eq!(got, Some(("http://built".into(), CpUrlSource::CompiledIn)));
+    }
+
+    #[test]
+    fn blank_values_do_not_count_as_set() {
+        // An exported-but-empty variable is a common accident and must fall through rather
+        // than resolve to an empty URL.
+        assert_eq!(
+            resolve_cp_url(Some("   "), None, Some("http://built")),
+            Some(("http://built".into(), CpUrlSource::CompiledIn))
+        );
+        assert_eq!(resolve_cp_url(None, None, None), None);
+        assert_eq!(resolve_cp_url(Some(""), Some(""), Some("")), None);
     }
 }
