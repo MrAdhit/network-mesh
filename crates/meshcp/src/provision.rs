@@ -65,6 +65,35 @@ struct CfServiceToken {
     client_secret: String,
 }
 
+/// Remove a node's Cloudflare device registration.
+///
+/// Nothing else ever will. Cloudflare ages a device out on its own telemetry, and we never send
+/// any: the tunnel is raw MASQUE, so every device we register looks freshly seen and then never
+/// speaks again. Left alone they accumulate one per enrolment, for the life of the account.
+pub async fn delete_cloudflare_device(
+    api_token: &str,
+    account_id: &str,
+    device_id: &str,
+) -> Result<()> {
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let resp = http
+        .delete(format!(
+            "{CF_API}/accounts/{account_id}/devices/{device_id}"
+        ))
+        .header("Authorization", format!("Bearer {api_token}"))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        bail!(
+            "cloudflare refused to delete device {device_id}: {}",
+            resp.status()
+        );
+    }
+    Ok(())
+}
+
 /// Verify the token, find the Zero Trust org, and make sure a Service Auth path into the WARP
 /// enrollment app exists. Returns what a node needs to enroll itself.
 pub async fn provision_cloudflare(

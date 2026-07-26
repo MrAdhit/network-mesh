@@ -146,22 +146,33 @@ impl CpClient {
     }
 
     pub async fn roster(&self) -> std::result::Result<Roster, CpError> {
-        self.roster_reporting(None).await
+        self.roster_reporting(None, None).await
     }
 
     /// `derp_region` tells the control plane which relay we measured as closest. It is only
     /// used if the network has not agreed on one yet.
+    /// `cf_device` is the Cloudflare device this node registered for itself. The control plane
+    /// cannot discover it any other way, and needs it to clean the registration up when the node
+    /// is removed.
     pub async fn roster_reporting(
         &self,
         derp_region: Option<u32>,
+        cf_device: Option<&str>,
     ) -> std::result::Result<Roster, CpError> {
         let token = self
             .node_token
             .as_ref()
             .ok_or_else(|| CpError::Other(anyhow!("no node token; enroll first")))?;
-        let url = match derp_region {
-            Some(r) => format!("{}/v1/roster?derp={r}", self.base),
-            None => format!("{}/v1/roster", self.base),
+        let mut q: Vec<String> = Vec::new();
+        if let Some(r) = derp_region {
+            q.push(format!("derp={r}"));
+        }
+        if let Some(d) = cf_device.filter(|d| !d.is_empty()) {
+            q.push(format!("cf_device={d}"));
+        }
+        let url = match q.is_empty() {
+            false => format!("{}/v1/roster?{}", self.base, q.join("&")),
+            true => format!("{}/v1/roster", self.base),
         };
         let resp = self
             .http

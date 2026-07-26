@@ -26,6 +26,9 @@ use super::tunnel::{DeviceIdentity, MasqueTunnel, SNI_CONSUMER, SNI_ZERO_TRUST, 
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 pub struct CloudflareBackhaul {
+    /// Our address inside the org's Mesh range. Carried here so a node that acquires the
+    /// backhaul after startup gets the address with it, rather than the two being set apart.
+    mesh_ip: std::net::Ipv4Addr,
     identity: DeviceIdentity,
     endpoint: IpAddr,
     ports: Vec<u16>,
@@ -39,12 +42,14 @@ pub struct CloudflareBackhaul {
 impl CloudflareBackhaul {
     pub async fn connect(
         identity: DeviceIdentity,
+        mesh_ip: std::net::Ipv4Addr,
         endpoint: IpAddr,
         ports: Vec<u16>,
         spki: Option<Vec<u8>>,
     ) -> Result<Self> {
         let first = Self::dial(&identity, endpoint, &ports, &spki).await?;
         Ok(Self {
+            mesh_ip,
             identity,
             endpoint,
             ports,
@@ -52,6 +57,11 @@ impl CloudflareBackhaul {
             tunnel: RwLock::new(Arc::new(first)),
             reconnecting: Mutex::new(()),
         })
+    }
+
+    /// Our address inside the org's Mesh range.
+    pub fn mesh_ip(&self) -> std::net::Ipv4Addr {
+        self.mesh_ip
     }
 
     /// The address Cloudflare handed us, if it told us one.

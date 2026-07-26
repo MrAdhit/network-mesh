@@ -59,6 +59,14 @@ pub struct ControlPlaneState {
     /// Last roster we successfully fetched.
     #[serde(default)]
     pub peers: Vec<crate::cp::RosterPeer>,
+    /// The backhaul configuration that came with it.
+    ///
+    /// Cached for the same reason the peers are: a node that restarts while the control plane is
+    /// unreachable has to come up on what it already knows. Without this it would forget how to
+    /// reach its backhauls at all, and could never retry them until someone restarted it at a
+    /// moment the control plane happened to be up.
+    #[serde(default)]
+    pub backhauls: crate::cp::BackhaulConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

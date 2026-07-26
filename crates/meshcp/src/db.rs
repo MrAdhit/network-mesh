@@ -81,6 +81,11 @@ impl Db {
                node_token TEXT NOT NULL UNIQUE,
                created_at TEXT NOT NULL,
                last_seen  INTEGER,
+               -- The Cloudflare device this node registered for itself. Recorded so removing a
+               -- node can also remove that registration; Cloudflare never expires them on its
+               -- own, because we speak MASQUE directly and never send the telemetry that would
+               -- keep a device looking alive.
+               cf_device_id TEXT,
                UNIQUE(account_id, virtual_ip)
              );
 
@@ -94,6 +99,10 @@ impl Db {
                PRIMARY KEY (account_id, kind)
              );",
         )?;
+        // `CREATE TABLE IF NOT EXISTS` does nothing for a database that already exists, so a
+        // column added later needs its own step. Failing means it is already there, which is
+        // the normal case on every start after the first.
+        let _ = conn.execute("ALTER TABLE nodes ADD COLUMN cf_device_id TEXT", []);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -305,6 +314,27 @@ impl Db {
             params![now_unix(), node_id],
         )?;
         Ok(())
+    }
+
+    /// Remember which Cloudflare device belongs to a node, so it can be cleaned up later.
+    pub fn set_cf_device(&self, node_id: &str, device_id: &str) -> Result<()> {
+        self.lock().execute(
+            "UPDATE nodes SET cf_device_id = ?2 WHERE id = ?1 AND IFNULL(cf_device_id, '') <> ?2",
+            params![node_id, device_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn cf_device_of(&self, account_id: &str, node_id: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT cf_device_id FROM nodes WHERE account_id = ?1 AND id = ?2",
+                params![account_id, node_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     pub fn delete_node(&self, account_id: &str, node_id: &str) -> Result<bool> {

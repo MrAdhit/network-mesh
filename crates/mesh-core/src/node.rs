@@ -32,6 +32,19 @@ const PUNCH_SPACING: Duration = Duration::from_millis(30);
 /// guessed at.
 const PREDICTION_SPREAD: u16 = 4;
 
+/// Most candidate addresses to keep for one peer.
+///
+/// The list only ever grew before. Every Hello appended whatever a peer advertised and nothing
+/// removed it, so a peer that roams between networks accumulated its whole history, and since an
+/// unconfirmed direct path sprays every candidate, the burst grew with it. The stale entries are
+/// not merely useless: a packet aimed at a port nobody has opened is exactly the event that
+/// makes a port-preserving NAT stop preserving, so spraying history actively damages the thing
+/// it is trying to establish. Oldest go first, because the newest address is the one a peer is
+/// most likely to be reachable at now.
+const MAX_DIRECT_CANDIDATES: usize = 16;
+/// Guesses are cheaper to be wrong about but more damaging to send, so fewer.
+const MAX_PREDICTED_CANDIDATES: usize = 8;
+
 /// How a peer is identified everywhere inside the node.
 ///
 /// The public key, not the name. Names are labels a user chooses and nothing stops two machines
@@ -112,6 +125,48 @@ pub struct PeerState {
     pub paths: BTreeMap<PathKind, PathStats>,
 }
 
+/// Could a mesh packet sent here plausibly reach the peer that advertised it?
+///
+/// Peers advertise their own candidates and nothing checks that the addresses are theirs, so an
+/// unbounded list of arbitrary addresses is a list of places this node can be made to send
+/// packets. Refusing the obviously bogus ones costs nothing and stops a buggy or hostile member
+/// pointing the spray somewhere it has no business going.
+pub fn plausible_candidate(a: &std::net::SocketAddr) -> bool {
+    if a.port() == 0 {
+        return false;
+    }
+    match a.ip() {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_unspecified() || v4.is_loopback() || v4.is_multicast() || v4.is_broadcast())
+        }
+        // A link-local v6 address needs a scope id to be routable and we have none, so sending
+        // there could only ever fail.
+        std::net::IpAddr::V6(v6) => {
+            !(v6.is_unspecified() || v6.is_loopback() || v6.is_multicast())
+                && (v6.segments()[0] & 0xffc0) != 0xfe80
+        }
+    }
+}
+
+/// Record a candidate address, keeping the list bounded and free of nonsense.
+///
+/// Reports whether it was new, so a caller can log a genuinely new address rather than every
+/// repeat of one it already had.
+pub fn remember_candidate(
+    list: &mut Vec<std::net::SocketAddr>,
+    addr: std::net::SocketAddr,
+    cap: usize,
+) -> bool {
+    if !plausible_candidate(&addr) || list.contains(&addr) {
+        return false;
+    }
+    if list.len() >= cap {
+        list.remove(0);
+    }
+    list.push(addr);
+    true
+}
+
 /// Paths that are actually carrying traffic to a peer, fastest first.
 ///
 /// Only live paths. A path with no recent reply is not a worse option, it is not an option: we
@@ -173,9 +228,14 @@ pub struct MeshNode {
     pub self_key: [u8; 32],
     /// Our address in our own subnet. This is what the TUN interface will own.
     pub virtual_ip: Option<Ipv4Addr>,
-    pub cf_ip: Option<Ipv4Addr>,
-    cf: Option<Arc<CloudflareBackhaul>>,
-    ts: Option<Arc<TailscaleBackhaul>>,
+    /// Both backhauls are swappable, because neither is guaranteed to exist when the daemon
+    /// starts. A node booting while the network is down used to exit outright; it now comes up
+    /// on whatever it has, and these are filled in by a retry once the network returns.
+    /// A std lock rather than tokio's: these are only ever swapped or cloned, never held
+    /// across an await, and keeping them sync stops the change rippling `async` through every
+    /// caller that just wants to know whether a backhaul exists.
+    cf: std::sync::RwLock<Option<Arc<CloudflareBackhaul>>>,
+    ts: std::sync::RwLock<Option<Arc<TailscaleBackhaul>>>,
     direct: Option<Arc<DirectTransport>>,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     tun: Arc<RwLock<Option<Arc<crate::tun::TunDevice>>>>,
@@ -200,7 +260,6 @@ impl MeshNode {
         name: String,
         self_key: [u8; 32],
         cf: Option<Arc<CloudflareBackhaul>>,
-        cf_ip: Option<Ipv4Addr>,
         ts: Option<Arc<TailscaleBackhaul>>,
         direct: Option<Arc<DirectTransport>>,
         virtual_ip: Option<Ipv4Addr>,
@@ -210,9 +269,8 @@ impl MeshNode {
             name,
             self_key,
             virtual_ip,
-            cf_ip,
-            cf,
-            ts,
+            cf: std::sync::RwLock::new(cf),
+            ts: std::sync::RwLock::new(ts),
             direct,
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             tun: Default::default(),
@@ -228,12 +286,41 @@ impl MeshNode {
         })
     }
 
+    pub fn cf(&self) -> Option<Arc<CloudflareBackhaul>> {
+        // A poisoned lock means some other task panicked mid-swap. The value itself is an
+        // Option<Arc> and cannot be torn, so recovering is strictly better than propagating.
+        self.cf.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn ts(&self) -> Option<Arc<TailscaleBackhaul>> {
+        self.ts.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Our address inside the Cloudflare Mesh range, if that backhaul is up.
+    pub fn cf_ip(&self) -> Option<Ipv4Addr> {
+        self.cf().map(|c| c.mesh_ip())
+    }
+
+    /// Adopt a Cloudflare backhaul that came up after startup, and start reading from it.
+    pub fn install_cloudflare(self: &Arc<Self>, cf: Arc<CloudflareBackhaul>) {
+        *self.cf.write().unwrap_or_else(|e| e.into_inner()) = Some(cf.clone());
+        tracing::info!(ip = %cf.mesh_ip(), "cloudflare backhaul adopted");
+        self.spawn_cloudflare_loop(cf);
+    }
+
+    /// Adopt a Tailscale backhaul that came up after startup, and start reading from it.
+    pub fn install_tailscale(self: &Arc<Self>, ts: Arc<TailscaleBackhaul>) {
+        *self.ts.write().unwrap_or_else(|e| e.into_inner()) = Some(ts.clone());
+        tracing::info!("tailscale backhaul adopted");
+        self.spawn_tailscale_loop(ts);
+    }
+
     pub fn available_paths(&self) -> Vec<PathKind> {
         let mut v = Vec::new();
-        if self.cf.is_some() && self.cf_ip.is_some() {
+        if self.cf().is_some() {
             v.push(PathKind::CloudflareMesh);
         }
-        if self.ts.is_some() {
+        if self.ts().is_some() {
             v.push(PathKind::TailscaleDerp);
         }
         // The direct path only exists once a peer has actually answered on it, so it is added
@@ -348,12 +435,9 @@ impl MeshNode {
         match path {
             PathKind::CloudflareMesh => {
                 let tunnel = self
-                    .cf
-                    .as_ref()
+                    .cf()
                     .ok_or_else(|| anyhow!("cloudflare backhaul is not up"))?;
-                let src = self
-                    .cf_ip
-                    .ok_or_else(|| anyhow!("we have no cloudflare mesh address"))?;
+                let src = tunnel.mesh_ip();
                 let dst = self
                     .peers
                     .read()
@@ -404,8 +488,7 @@ impl MeshNode {
             }
             PathKind::TailscaleDerp => {
                 let ts = self
-                    .ts
-                    .as_ref()
+                    .ts()
                     .ok_or_else(|| anyhow!("tailscale backhaul is not up"))?;
                 let hostname = self
                     .peers
@@ -462,7 +545,7 @@ impl MeshNode {
                 .get(peer)
                 .map(|p| p.cf_ip.is_none())
                 .unwrap_or(false);
-            if unknown && self.cf.is_some() {
+            if unknown && self.cf().is_some() {
                 self.hello_to(peer, true).await;
             }
         }
@@ -522,7 +605,7 @@ impl MeshNode {
             .map(|a| a.to_string());
 
         let payload = HelloPayload {
-            cf_ip: self.cf_ip.map(|ip| ip.to_string()),
+            cf_ip: self.cf_ip().map(|ip| ip.to_string()),
             direct,
             predicted: self.predicted_candidates().await,
             seen_you_at,
@@ -612,7 +695,7 @@ impl MeshNode {
             return;
         }
         let payload = HelloPayload {
-            cf_ip: self.cf_ip.map(|ip| ip.to_string()),
+            cf_ip: self.cf_ip().map(|ip| ip.to_string()),
             direct: candidates,
             predicted: self.predicted_candidates().await,
             seen_you_at: None,
@@ -848,15 +931,16 @@ impl MeshNode {
                         p.cf_ip = Some(ip);
                     }
                     for c in candidates {
-                        if !p.direct_candidates.contains(&c) {
+                        if remember_candidate(&mut p.direct_candidates, c, MAX_DIRECT_CANDIDATES) {
                             tracing::debug!(peer = %frame.sender, candidate = %c, "new direct candidate");
-                            p.direct_candidates.push(c);
                         }
                     }
                     for c in hello.predicted_addrs() {
-                        if !p.predicted_candidates.contains(&c) {
-                            p.predicted_candidates.push(c);
-                        }
+                        remember_candidate(
+                            &mut p.predicted_candidates,
+                            c,
+                            MAX_PREDICTED_CANDIDATES,
+                        );
                     }
                 }
             }
@@ -867,14 +951,14 @@ impl MeshNode {
                     let mut w = self.peers.write().await;
                     if let Some(p) = w.get_mut(&frame.sender_key) {
                         for c in hello.direct_addrs() {
-                            if !p.direct_candidates.contains(&c) {
-                                p.direct_candidates.push(c);
-                            }
+                            remember_candidate(&mut p.direct_candidates, c, MAX_DIRECT_CANDIDATES);
                         }
                         for c in hello.predicted_addrs() {
-                            if !p.predicted_candidates.contains(&c) {
-                                p.predicted_candidates.push(c);
-                            }
+                            remember_candidate(
+                                &mut p.predicted_candidates,
+                                c,
+                                MAX_PREDICTED_CANDIDATES,
+                            );
                         }
                     }
                 }
@@ -987,8 +1071,14 @@ impl MeshNode {
                 let packet = match tun.recv().await {
                     Ok(p) => p,
                     Err(e) => {
-                        tracing::error!(error = %e, "tun read failed");
-                        break;
+                        // Breaking here left the daemon running and answering meshctl while
+                        // moving no traffic whatsoever, because the only thing that reads
+                        // packets had stopped. Far better to keep trying and stay noisy: a
+                        // genuinely dead interface is then visible in the log rather than
+                        // silent.
+                        tracing::error!(error = %e, "tun read failed; retrying");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        continue;
                     }
                 };
                 let Some(dst) = crate::tun::ipv4_destination(&packet) else {
@@ -1090,52 +1180,61 @@ impl MeshNode {
         self.data_rx.lock().await.recv().await
     }
 
+    fn spawn_cloudflare_loop(self: &Arc<Self>, cf: Arc<CloudflareBackhaul>) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match cf.recv_packet().await {
+                    Ok(pkt) => {
+                        let Some(udp) = ip::parse_udp4(&pkt) else {
+                            continue;
+                        };
+                        if udp.dst_port != crate::proto::MESH_PORT {
+                            continue;
+                        }
+                        match Frame::decode(&udp.payload) {
+                            Ok(f) => me.handle_frame(f, PathKind::CloudflareMesh, None).await,
+                            Err(e) => tracing::trace!(error = %e, "non-mesh udp in tunnel"),
+                        }
+                    }
+                    Err(e) => {
+                        // Not fatal, and not a reason to stop: the backhaul has already rebuilt
+                        // the tunnel underneath us by the time this returns. Breaking out here
+                        // is what used to cost the path permanently.
+                        tracing::warn!(error = %e, "cloudflare tunnel receive failed; reconnected");
+                    }
+                }
+            }
+        });
+    }
+
+    fn spawn_tailscale_loop(self: &Arc<Self>, ts: Arc<TailscaleBackhaul>) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match ts.recv().await {
+                    Ok((src, bytes)) => match Frame::decode(&bytes) {
+                        Ok(f) => me.handle_frame(f, PathKind::TailscaleDerp, Some(src)).await,
+                        Err(e) => tracing::trace!(error = %e, "non-mesh packet over derp"),
+                    },
+                    Err(e) => {
+                        // `recv` reconnects internally and only surfaces an error it could not
+                        // recover from, so pause rather than spin, and keep the path alive.
+                        tracing::warn!(error = %e, "derp receive failed");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
+        });
+    }
+
     /// Start receive loops for each backhaul plus the probe timer.
     pub fn start(self: &Arc<Self>, probe_interval: Duration) {
-        if let Some(cf) = self.cf.clone() {
-            let me = self.clone();
-            tokio::spawn(async move {
-                loop {
-                    match cf.recv_packet().await {
-                        Ok(pkt) => {
-                            let Some(udp) = ip::parse_udp4(&pkt) else {
-                                continue;
-                            };
-                            if udp.dst_port != crate::proto::MESH_PORT {
-                                continue;
-                            }
-                            match Frame::decode(&udp.payload) {
-                                Ok(f) => me.handle_frame(f, PathKind::CloudflareMesh, None).await,
-                                Err(e) => tracing::trace!(error = %e, "non-mesh udp in tunnel"),
-                            }
-                        }
-                        Err(e) => {
-                            // Not fatal, and not a reason to stop: the backhaul has already
-                            // rebuilt the tunnel underneath us by the time this returns.
-                            // Breaking out here is what used to cost the path permanently.
-                            tracing::warn!(error = %e, "cloudflare tunnel receive failed; reconnected");
-                        }
-                    }
-                }
-            });
+        if let Some(cf) = self.cf() {
+            self.spawn_cloudflare_loop(cf);
         }
-
-        if let Some(ts) = self.ts.clone() {
-            let me = self.clone();
-            tokio::spawn(async move {
-                loop {
-                    match ts.recv().await {
-                        Ok((src, bytes)) => match Frame::decode(&bytes) {
-                            Ok(f) => me.handle_frame(f, PathKind::TailscaleDerp, Some(src)).await,
-                            Err(e) => tracing::trace!(error = %e, "non-mesh packet over derp"),
-                        },
-                        Err(e) => {
-                            tracing::error!(error = %e, "derp receive failed");
-                            break;
-                        }
-                    }
-                }
-            });
+        if let Some(ts) = self.ts() {
+            self.spawn_tailscale_loop(ts);
         }
 
         if let Some(direct) = self.direct.clone() {
@@ -1151,8 +1250,12 @@ impl MeshNode {
                             Err(e) => tracing::trace!(%from, error = %e, "non-mesh udp"),
                         },
                         Err(e) => {
-                            tracing::error!(error = %e, "direct socket receive failed");
-                            break;
+                            // Not fatal. Giving up here cost the direct path until the daemon
+                            // restarted, which is the same failure the Cloudflare loop used to
+                            // have. The socket outlives a transient error, so pause briefly to
+                            // avoid spinning on a persistent one and carry on reading.
+                            tracing::warn!(error = %e, "direct socket receive failed");
+                            tokio::time::sleep(Duration::from_millis(200)).await;
                         }
                     }
                 }
@@ -1329,7 +1432,7 @@ mod tests {
         // rather than a corner one. Keyed by name, the second enrolment overwrote the first and
         // every frame from the loser was then dropped as coming from an unknown key, leaving one
         // of the two machines permanently unreachable.
-        let node = MeshNode::new("me".into(), [9u8; 32], None, None, None, None, None);
+        let node = MeshNode::new("me".into(), [9u8; 32], None, None, None, None);
         node.apply_roster(&[
             roster_entry("mesh-node", "192.168.42.2", 1),
             roster_entry("mesh-node", "192.168.42.3", 2),
@@ -1343,7 +1446,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_address_picks_one_of_them_and_the_shared_name_picks_neither() {
-        let node = MeshNode::new("me".into(), [9u8; 32], None, None, None, None, None);
+        let node = MeshNode::new("me".into(), [9u8; 32], None, None, None, None);
         node.apply_roster(&[
             roster_entry("mesh-node", "192.168.42.2", 1),
             roster_entry("mesh-node", "192.168.42.3", 2),
@@ -1363,7 +1466,7 @@ mod tests {
 
     #[tokio::test]
     async fn renaming_a_node_moves_the_label_not_the_identity() {
-        let node = MeshNode::new("me".into(), [9u8; 32], None, None, None, None, None);
+        let node = MeshNode::new("me".into(), [9u8; 32], None, None, None, None);
         node.apply_roster(&[roster_entry("old", "192.168.42.2", 1)])
             .await;
         node.apply_roster(&[roster_entry("new", "192.168.42.2", 1)])
@@ -1373,5 +1476,59 @@ mod tests {
         assert_eq!(node.peer(&[1u8; 32]).await.unwrap().name, "new");
         assert!(node.resolve("old").await.is_empty());
         assert_eq!(node.resolve("new").await, vec![[1u8; 32]]);
+    }
+
+    #[test]
+    fn a_candidate_list_stays_bounded_and_prefers_the_newest() {
+        let mut list = Vec::new();
+        for i in 0..(MAX_DIRECT_CANDIDATES + 5) {
+            let a: std::net::SocketAddr = format!("10.0.0.{i}:47778").parse().unwrap();
+            remember_candidate(&mut list, a, MAX_DIRECT_CANDIDATES);
+        }
+        assert_eq!(list.len(), MAX_DIRECT_CANDIDATES, "the cap holds");
+        // The oldest went first: a peer's newest address is the one it is reachable at now.
+        assert!(!list.contains(&"10.0.0.0:47778".parse().unwrap()));
+        assert!(list.contains(&"10.0.0.20:47778".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_repeat_is_not_a_new_candidate() {
+        let mut list = Vec::new();
+        let a: std::net::SocketAddr = "10.0.0.1:47778".parse().unwrap();
+        assert!(remember_candidate(&mut list, a, 4), "first time is new");
+        assert!(!remember_candidate(&mut list, a, 4), "second time is not");
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn nonsense_addresses_are_refused() {
+        // A peer advertises these; nothing verifies they are its own, so the obviously
+        // unusable ones must never make it into a list we later spray packets at.
+        let mut list = Vec::new();
+        for bad in [
+            "0.0.0.0:47778",
+            "127.0.0.1:47778",
+            "224.0.0.251:47778",
+            "255.255.255.255:47778",
+            "10.0.0.1:0",
+            "[::1]:47778",
+            "[::]:47778",
+            "[fe80::1]:47778",
+            "[ff02::1]:47778",
+        ] {
+            let a: std::net::SocketAddr = bad.parse().unwrap();
+            assert!(
+                !remember_candidate(&mut list, a, 8),
+                "{bad} must be refused"
+            );
+        }
+        assert!(list.is_empty());
+
+        // Ordinary private, public and ULA addresses still get through.
+        for good in ["192.168.1.4:47778", "100.99.7.114:47778", "[fd7a::1]:47778"] {
+            let a: std::net::SocketAddr = good.parse().unwrap();
+            assert!(remember_candidate(&mut list, a, 8), "{good} must be kept");
+        }
+        assert_eq!(list.len(), 3);
     }
 }

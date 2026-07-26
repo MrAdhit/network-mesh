@@ -54,6 +54,8 @@ async fn enroll(
         virtual_ip: resp.virtual_ip,
         subnet: resp.subnet,
         peers: Vec::new(),
+        // Filled in by the first roster fetch, moments from now.
+        backhauls: Default::default(),
     });
     state.save(state_dir)?;
     Ok(())
@@ -141,7 +143,7 @@ async fn main() -> Result<()> {
                     derp_region: None,
                     self_virtual_ip: cp_state.virtual_ip.clone(),
                     peers: cp_state.peers.clone(),
-                    backhauls: Default::default(),
+                    backhauls: cp_state.backhauls.clone(),
                 },
                 false,
             )
@@ -150,6 +152,7 @@ async fn main() -> Result<()> {
     if fresh {
         if let Some(c) = state.control_plane.as_mut() {
             c.peers = roster.peers.clone();
+            c.backhauls = roster.backhauls.clone();
             c.virtual_ip = roster.self_virtual_ip.clone();
             c.subnet = roster.subnet.clone();
         }
@@ -163,12 +166,10 @@ async fn main() -> Result<()> {
 
     // --- Cloudflare backhaul ---
     let mut cf_tunnel: Option<Arc<CloudflareBackhaul>> = None;
-    let mut cf_ip: Option<Ipv4Addr> = None;
     match roster.backhauls.cloudflare.clone() {
         Some(cfg) => match bring_up_cloudflare(&state_dir, &mut state, &cfg, &node_name).await {
             Ok((t, ip)) => {
                 cf_tunnel = Some(Arc::new(t));
-                cf_ip = Some(ip);
                 tracing::info!(%ip, "cloudflare backhaul up");
             }
             // A dead backhaul is a degraded mesh, not a dead one. That is the entire premise.
@@ -207,8 +208,13 @@ async fn main() -> Result<()> {
         tracing::warn!("this network has no tailscale credentials; skipping");
     }
 
+    // Deliberately not fatal any more. Exiting here meant a machine that rebooted while the
+    // network was down stayed down until somebody logged in and started it by hand, which is the
+    // one situation where unattended recovery matters most. A node with no relay is degraded,
+    // not useless: it still serves peers on the same LAN over the direct path, using the roster
+    // it cached, and the retry below adopts the relays the moment they come back.
     if cf_tunnel.is_none() && ts.is_none() {
-        return Err(anyhow!("no backhaul came up; nothing to do"));
+        tracing::warn!("no backhaul came up; running on the direct path alone and retrying");
     }
 
     // The direct path is not a backhaul and does not gate startup: it either gets discovered
@@ -256,8 +262,7 @@ async fn main() -> Result<()> {
     let node = MeshNode::new(
         node_name.clone(),
         identity.public_bytes(),
-        cf_tunnel,
-        cf_ip,
+        cf_tunnel.clone(),
         ts.clone(),
         direct,
         Some(virtual_ip),
@@ -291,6 +296,64 @@ async fn main() -> Result<()> {
         .unwrap_or(2);
     node.start(Duration::from_secs(interval));
 
+    // Adopt whichever relays failed to come up, once they can. Without this a node that started
+    // during an outage would run direct-only for the rest of its life, which is exactly the
+    // "recovers on its own" property the reconnect logic exists to provide; the only difference
+    // here is that there was never a connection to reconnect.
+    if cf_tunnel.is_none()
+        && let Some(cfg) = roster.backhauls.cloudflare.clone()
+    {
+        let (node, state_dir, node_name) = (node.clone(), state_dir.clone(), node_name.clone());
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(5);
+            loop {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+                let Ok(mut st) = NodeState::load(&state_dir) else {
+                    continue;
+                };
+                match bring_up_cloudflare(&state_dir, &mut st, &cfg, &node_name).await {
+                    Ok((t, _)) => {
+                        node.install_cloudflare(Arc::new(t));
+                        return;
+                    }
+                    Err(e) => tracing::debug!(error = %e, "cloudflare still down; will retry"),
+                }
+            }
+        });
+    }
+
+    if ts.is_none() && roster.backhauls.tailscale_available {
+        let (node, state_dir, node_name, cp) = (
+            node.clone(),
+            state_dir.clone(),
+            node_name.clone(),
+            cp.clone(),
+        );
+        let region = roster.derp_region;
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(5);
+            loop {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+                let Ok(auth_key) = cp.tailscale_auth_key().await else {
+                    continue;
+                };
+                match TailscaleBackhaul::connect_to_region(
+                    &state_dir, &node_name, &auth_key, region,
+                )
+                .await
+                {
+                    Ok(b) => {
+                        node.install_tailscale(Arc::new(b));
+                        return;
+                    }
+                    Err(e) => tracing::debug!(error = ?e, "tailscale still down; will retry"),
+                }
+            }
+        });
+    }
+
     // NAT traversal: keep our reflexive address current and punch at peers we cannot reach
     // directly yet. Harmless on a flat network, where the first candidate already works.
     let mut stun_servers: Vec<SocketAddr> = roster
@@ -318,6 +381,14 @@ async fn main() -> Result<()> {
         let state_dir = state_dir.clone();
         // Report our measured region so the first node to poll settles it for the network.
         let region = ts.as_ref().map(|t| t.region_id);
+        // Tell the control plane which Cloudflare device is ours, so removing this node can
+        // remove the registration too. Nothing else knows the mapping: the node registers with
+        // Cloudflare directly and the control plane never sees the exchange.
+        let cf_device = state
+            .cloudflare
+            .as_ref()
+            .map(|c| c.device_id.clone())
+            .unwrap_or_default();
         let shutdown_tx = shutdown_tx.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(30));
@@ -326,7 +397,7 @@ async fn main() -> Result<()> {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                match cp.roster_reporting(region).await {
+                match cp.roster_reporting(region, Some(cf_device.as_str())).await {
                     Ok(r) => {
                         rejected = 0;
                         node.apply_roster(&r.peers).await;
@@ -370,7 +441,7 @@ async fn main() -> Result<()> {
     state.direct_port_poisoned = false;
     state.save(&state_dir)?;
 
-    serve(node, ts, Instant::now(), roster.subnet.clone(), shutdown_rx).await
+    serve(node, Instant::now(), roster.subnet.clone(), shutdown_rx).await
 }
 
 async fn bring_up_cloudflare(
@@ -461,7 +532,7 @@ async fn bring_up_cloudflare(
         cf.endpoint_ports.clone()
     };
     // The backhaul owns the dialling from here, because it has to redo it on every reconnect.
-    let cf = CloudflareBackhaul::connect(identity, endpoint_ip, ports, spki).await?;
+    let cf = CloudflareBackhaul::connect(identity, ip, endpoint_ip, ports, spki).await?;
     Ok((cf, ip))
 }
 
@@ -501,7 +572,6 @@ async fn resolve_one(
 
 async fn serve(
     node: Arc<MeshNode>,
-    ts: Option<Arc<TailscaleBackhaul>>,
     started: Instant,
     subnet: String,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -554,7 +624,6 @@ async fn serve(
             }
         };
         let node = node.clone();
-        let ts = ts.clone();
         let subnet = subnet.clone();
         tokio::spawn(async move {
             let (r, mut w) = tokio::io::split(stream);
@@ -564,7 +633,7 @@ async fn serve(
                 return;
             }
             let resp = match serde_json::from_str::<Request>(line.trim()) {
-                Ok(req) => handle(&node, ts.as_deref(), started, &subnet, req).await,
+                Ok(req) => handle(&node, started, &subnet, req).await,
                 Err(e) => Response::Error(format!("bad request: {e}")),
             };
             let mut out = serde_json::to_string(&resp)
@@ -576,13 +645,7 @@ async fn serve(
     }
 }
 
-async fn handle(
-    node: &Arc<MeshNode>,
-    ts: Option<&TailscaleBackhaul>,
-    started: Instant,
-    subnet: &str,
-    req: Request,
-) -> Response {
+async fn handle(node: &Arc<MeshNode>, started: Instant, subnet: &str, req: Request) -> Response {
     match req {
         Request::Status => {
             let paths = node.available_paths();
@@ -598,12 +661,14 @@ async fn handle(
                     .then(|| BackhaulReport {
                         up: true,
                         address: node
-                            .cf_ip
+                            .cf_ip()
                             .map(|i| i.to_string())
                             .unwrap_or_else(|| "-".into()),
                         detail: "connect-ip over quic".into(),
                     }),
-                tailscale: ts.map(|t| BackhaulReport {
+                // Read from the node, not from whatever existed at startup: a backhaul adopted
+                // later must show up here, or status quietly lies about a working path.
+                tailscale: node.ts().map(|t| BackhaulReport {
                     up: true,
                     address: t
                         .self_addrs

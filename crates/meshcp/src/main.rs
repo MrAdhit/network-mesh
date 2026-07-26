@@ -248,6 +248,11 @@ async fn remove_node(
     Path(node_id): Path<String>,
 ) -> Reply<serde_json::Value> {
     let account = account_from_session(&app, &headers)?;
+    // Read the device before the row goes, since afterwards there is nothing left to ask.
+    let device = app
+        .db
+        .cf_device_of(&account.id, &node_id)
+        .map_err(internal)?;
     let removed = app
         .db
         .delete_node(&account.id, &node_id)
@@ -255,7 +260,31 @@ async fn remove_node(
     if !removed {
         return Err(bad("no such node"));
     }
-    Ok(Json(serde_json::json!({ "removed": node_id })))
+
+    // Best effort, and deliberately after the removal has already succeeded. The node is gone
+    // from the mesh either way; a Cloudflare API that is slow or unhappy should not turn a
+    // successful removal into an error the operator has to retry.
+    let mut device_removed = false;
+    if let Some(device) = device
+        && let Ok(Some((sealed, _))) = app.db.get_cred(&account.id, CRED_CLOUDFLARE)
+        && let Ok(json) = app.sealer.open(&sealed)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&json)
+    {
+        let token = v["api_token"].as_str().unwrap_or_default();
+        let cf_account = v["account_id"].as_str().unwrap_or_default();
+        match provision::delete_cloudflare_device(token, cf_account, &device).await {
+            Ok(()) => {
+                tracing::info!(node = %node_id, %device, "cloudflare device removed");
+                device_removed = true;
+            }
+            Err(e) => {
+                tracing::warn!(node = %node_id, %device, error = %e, "could not remove the cloudflare device")
+            }
+        }
+    }
+    Ok(Json(
+        serde_json::json!({ "removed": node_id, "cloudflare_device_removed": device_removed }),
+    ))
 }
 
 fn node_view(n: db::Node) -> NodeView {
@@ -307,6 +336,11 @@ struct RosterQuery {
     /// The DERP region this node measured as closest. Only used if nothing is agreed yet.
     #[serde(default)]
     derp: Option<u32>,
+    /// The Cloudflare device this node registered for itself. A node registers directly with
+    /// Cloudflare, so this is the only way the control plane learns which device is whose, and
+    /// without it removing a node would leak the registration forever.
+    #[serde(default)]
+    cf_device: Option<String>,
 }
 
 async fn roster(
@@ -320,6 +354,9 @@ async fn roster(
         app.db
             .set_derp_region_if_unset(&me.account_id, region)
             .map_err(internal)?;
+    }
+    if let Some(device) = q.cf_device.as_deref().filter(|d| !d.is_empty()) {
+        app.db.set_cf_device(&me.id, device).map_err(internal)?;
     }
 
     let account = app
