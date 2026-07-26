@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use mesh_core::cloudflare::{DeviceIdentity, MasqueTunnel, TunnelConfig, api, tunnel};
+use mesh_core::cloudflare::{CloudflareBackhaul, DeviceIdentity, api, tunnel};
 use mesh_core::cp::CloudflareConfig;
 use mesh_core::cpclient::{CpClient, NodeIdentity};
 use mesh_core::direct::DirectTransport;
@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
     tracing::info!(%virtual_ip, subnet = %roster.subnet, peers = roster.peers.len(), "roster");
 
     // --- Cloudflare backhaul ---
-    let mut cf_tunnel: Option<Arc<MasqueTunnel>> = None;
+    let mut cf_tunnel: Option<Arc<CloudflareBackhaul>> = None;
     let mut cf_ip: Option<Ipv4Addr> = None;
     match roster.backhauls.cloudflare.clone() {
         Some(cfg) => match bring_up_cloudflare(&state_dir, &mut state, &cfg, &node_name).await {
@@ -378,7 +378,7 @@ async fn bring_up_cloudflare(
     state: &mut NodeState,
     cfg: &CloudflareConfig,
     node_name: &str,
-) -> Result<(MasqueTunnel, Ipv4Addr)> {
+) -> Result<(CloudflareBackhaul, Ipv4Addr)> {
     let team = cfg.team.clone();
     let client_id = cfg.service_client_id.clone();
     let client_secret = cfg.service_client_secret.clone();
@@ -460,27 +460,43 @@ async fn bring_up_cloudflare(
     } else {
         cf.endpoint_ports.clone()
     };
-    let mut last_err = None;
-    for sni in [tunnel::SNI_ZERO_TRUST, tunnel::SNI_CONSUMER] {
-        for port in ports.iter().take(3) {
-            let cfg = TunnelConfig {
-                endpoint: SocketAddr::new(endpoint_ip, *port),
-                sni: sni.to_string(),
-                endpoint_spki: spki.clone(),
-            };
-            match MasqueTunnel::connect(&identity, &cfg).await {
-                Ok(t) => {
-                    tracing::info!(sni, port, "masque connected");
-                    return Ok((t, ip));
-                }
-                Err(e) => {
-                    tracing::warn!(sni, port, error = %e, "masque attempt failed");
-                    last_err = Some(e);
+    // The backhaul owns the dialling from here, because it has to redo it on every reconnect.
+    let cf = CloudflareBackhaul::connect(identity, endpoint_ip, ports, spki).await?;
+    Ok((cf, ip))
+}
+
+/// Turn what the user typed into exactly one peer.
+///
+/// Node names are not unique and the default is the same string on every install, so a name can
+/// genuinely match two machines. Picking one silently would send traffic to an arbitrary member
+/// of the pair, which is worse than refusing: the mesh address always identifies exactly one
+/// node, so the answer is to say which ones matched and let the user pick.
+async fn resolve_one(
+    node: &Arc<MeshNode>,
+    needle: &str,
+) -> Result<mesh_core::node::PeerKey, String> {
+    let keys = node.resolve(needle).await;
+    match keys.as_slice() {
+        [one] => Ok(*one),
+        [] => Err(format!("no peer called {needle}")),
+        many => {
+            let mut addrs = Vec::new();
+            for k in many {
+                if let Some(p) = node.peer(k).await {
+                    addrs.push(
+                        p.virtual_ip
+                            .map(|i| i.to_string())
+                            .unwrap_or_else(|| mesh_core::node::fingerprint(k)),
+                    );
                 }
             }
+            Err(format!(
+                "{} nodes are called {needle}; address one of them directly: {}",
+                many.len(),
+                addrs.join(", ")
+            ))
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow!("no masque endpoint was reachable")))
 }
 
 async fn serve(
@@ -628,8 +644,12 @@ async fn handle(
                 .collect(),
         ),
         Request::Ping { peer, count } => {
+            let key = match resolve_one(node, &peer).await {
+                Ok(k) => k,
+                Err(e) => return Response::Error(e),
+            };
             let samples = node
-                .ping(&peer, count.clamp(1, 100), Duration::from_secs(5))
+                .ping(&key, count.clamp(1, 100), Duration::from_secs(5))
                 .await;
             Response::Ping(
                 samples
@@ -645,7 +665,11 @@ async fn handle(
         Request::Send { peer, data } => {
             let bytes = data.into_bytes();
             let n = bytes.len();
-            match node.send_data(&peer, bytes).await {
+            let key = match resolve_one(node, &peer).await {
+                Ok(k) => k,
+                Err(e) => return Response::Error(e),
+            };
+            match node.send_data(&key, bytes).await {
                 Ok(path) => Response::Sent {
                     path: path.to_string(),
                     bytes: n,

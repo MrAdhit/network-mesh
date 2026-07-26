@@ -91,6 +91,86 @@ pub fn build_udp4(
     pkt
 }
 
+pub const ICMP_DEST_UNREACHABLE: u8 = 3;
+pub const ICMP_HOST_UNREACHABLE: u8 = 1;
+
+/// Build an ICMP "destination host unreachable" for a packet we could not deliver.
+///
+/// Without this a peer with no live path is a black hole: the sending application waits for a
+/// timeout that never carries any information. A real router answers, so we answer too, and the
+/// local stack fails the connection immediately with something the user can read.
+///
+/// RFC 792 puts the offending packet's IP header plus the first eight bytes of its payload in
+/// the body. That quote is what lets the receiving stack match the error back to the socket that
+/// sent it, so a bare header would be delivered and then ignored.
+///
+/// The error is sourced from the address that could not be reached, not from ours. Sourcing it
+/// from our own mesh address is the intuitive choice and it does not work: the packet arrives at
+/// the kernel from a device, and every stack drops an inbound packet whose source is one of the
+/// host's own addresses as a martian. On Linux that check is separate from `rp_filter`, so it
+/// bites even with filtering off. Verified the hard way, watching correctly formed errors reach
+/// the interface and get discarded before the pinging socket ever saw them.
+///
+/// Returns `None` when answering would be wrong rather than merely unhelpful: a malformed
+/// packet, one sent to a multicast or broadcast address, or an ICMP error, since answering an
+/// error with an error is how you build a packet storm.
+pub fn build_icmp4_unreachable(original: &[u8], ident: u16) -> Option<Vec<u8>> {
+    if original.len() < IPV4_HEADER_LEN || original[0] >> 4 != 4 {
+        return None;
+    }
+    let ihl = ((original[0] & 0x0f) as usize) * 4;
+    if ihl < IPV4_HEADER_LEN || original.len() < ihl {
+        return None;
+    }
+
+    // The sender of the undeliverable packet is who hears about it.
+    let reply_to = std::net::Ipv4Addr::new(original[12], original[13], original[14], original[15]);
+    if reply_to.is_unspecified() || reply_to.is_multicast() || reply_to.is_broadcast() {
+        return None;
+    }
+    // The unreachable destination stands in as the sender of the error.
+    let src = std::net::Ipv4Addr::new(original[16], original[17], original[18], original[19]);
+    if src.is_multicast() || src.is_broadcast() {
+        return None;
+    }
+    if original[9] == PROTO_ICMP
+        && let Some(t) = original.get(ihl)
+        && matches!(*t, 3 | 4 | 5 | 11 | 12)
+    {
+        return None;
+    }
+
+    let quote = &original[..(ihl + 8).min(original.len())];
+    let icmp_len = 8 + quote.len();
+    let total_len = (IPV4_HEADER_LEN + icmp_len) as u16;
+
+    let mut pkt = Vec::with_capacity(total_len as usize);
+    pkt.push(0x45);
+    pkt.push(0x00);
+    pkt.extend_from_slice(&total_len.to_be_bytes());
+    pkt.extend_from_slice(&ident.to_be_bytes());
+    pkt.extend_from_slice(&0x0000u16.to_be_bytes());
+    pkt.push(64); // TTL
+    pkt.push(PROTO_ICMP);
+    pkt.extend_from_slice(&[0, 0]); // checksum placeholder
+    pkt.extend_from_slice(&src.octets());
+    pkt.extend_from_slice(&reply_to.octets());
+    let hdr_ck = checksum(&[&pkt[..IPV4_HEADER_LEN]]);
+    pkt[10..12].copy_from_slice(&hdr_ck.to_be_bytes());
+
+    let icmp_start = pkt.len();
+    pkt.push(ICMP_DEST_UNREACHABLE);
+    pkt.push(ICMP_HOST_UNREACHABLE);
+    pkt.extend_from_slice(&[0, 0]); // checksum placeholder
+    pkt.extend_from_slice(&[0, 0, 0, 0]); // unused
+    pkt.extend_from_slice(quote);
+    // ICMP has no pseudo-header: the checksum covers the ICMP message alone.
+    let icmp_ck = checksum(&[&pkt[icmp_start..]]);
+    pkt[icmp_start + 2..icmp_start + 4].copy_from_slice(&icmp_ck.to_be_bytes());
+
+    Some(pkt)
+}
+
 #[derive(Debug, Clone)]
 pub struct Udp4Packet {
     pub src: std::net::Ipv4Addr,
@@ -179,5 +259,69 @@ mod tests {
             1,
         );
         assert_eq!(parse_udp4(&pkt).unwrap().payload, b"odd");
+    }
+
+    /// A packet from the mesh peer we are pretending we cannot reach.
+    fn undeliverable() -> Vec<u8> {
+        build_udp4(
+            std::net::Ipv4Addr::new(192, 168, 42, 2),
+            std::net::Ipv4Addr::new(192, 168, 42, 3),
+            4000,
+            5000,
+            b"hello",
+            7,
+        )
+    }
+
+    #[test]
+    fn rejects_an_undeliverable_packet_back_to_its_sender() {
+        let orig = undeliverable();
+        let icmp = build_icmp4_unreachable(&orig, 1).unwrap();
+
+        assert_eq!(icmp[9], PROTO_ICMP);
+        // Sourced from the unreachable destination, never from us: our own address would be
+        // dropped as a martian before the sending socket could see the error.
+        assert_eq!(&icmp[12..16], &[192, 168, 42, 3]);
+        // Straight back to whoever sent the packet we could not deliver.
+        assert_eq!(&icmp[16..20], &[192, 168, 42, 2]);
+        assert_eq!(icmp[IPV4_HEADER_LEN], ICMP_DEST_UNREACHABLE);
+        assert_eq!(icmp[IPV4_HEADER_LEN + 1], ICMP_HOST_UNREACHABLE);
+
+        // A correct checksum sums to zero over the data it covers; that is the whole trick, and
+        // it is what the receiving stack will check before it believes any of this.
+        assert_eq!(checksum(&[&icmp[..IPV4_HEADER_LEN]]), 0, "ipv4 header");
+        assert_eq!(checksum(&[&icmp[IPV4_HEADER_LEN..]]), 0, "icmp message");
+
+        // RFC 792: the original header plus eight bytes of its payload. Without that quote the
+        // sender cannot tell which socket the error belongs to and ignores it.
+        let quote = &icmp[IPV4_HEADER_LEN + 8..];
+        assert_eq!(quote.len(), IPV4_HEADER_LEN + 8);
+        assert_eq!(&quote[..IPV4_HEADER_LEN + 8], &orig[..IPV4_HEADER_LEN + 8]);
+    }
+
+    #[test]
+    fn never_answers_an_error_with_an_error() {
+        // Two nodes each rejecting the other's rejections is a packet storm.
+        let orig = undeliverable();
+        let icmp = build_icmp4_unreachable(&orig, 1).unwrap();
+        assert!(build_icmp4_unreachable(&icmp, 2).is_none());
+    }
+
+    #[test]
+    fn stays_quiet_when_answering_would_be_wrong() {
+        assert!(build_icmp4_unreachable(&[], 1).is_none(), "empty");
+        assert!(
+            build_icmp4_unreachable(&[0x60; 40], 1).is_none(),
+            "ipv6 is not ours to answer"
+        );
+
+        // Nobody is the sender of a multicast, so there is no one to tell.
+        let mut mcast = undeliverable();
+        mcast[16..20].copy_from_slice(&[224, 0, 0, 251]);
+        assert!(build_icmp4_unreachable(&mcast, 1).is_none());
+
+        let mut from_nowhere = undeliverable();
+        from_nowhere[12..16].copy_from_slice(&[0, 0, 0, 0]);
+        assert!(build_icmp4_unreachable(&from_nowhere, 1).is_none());
     }
 }

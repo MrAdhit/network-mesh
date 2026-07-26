@@ -336,7 +336,14 @@ impl TailscaleBackhaul {
         if !Arc::ptr_eq(&*self.derp.read().await, stale) {
             return;
         }
-        for attempt in 1..=5u32 {
+        // No attempt limit. Giving up left the relay path down until the daemon was restarted,
+        // which is worst exactly when it matters: an outage long enough to exhaust a handful of
+        // tries is the one nobody is watching. Backoff is capped so a long outage costs a probe
+        // every half minute rather than a tight loop.
+        let mut backoff = Duration::from_secs(1);
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
             match ts_derp::DefaultClient::connect(self.servers.iter(), &self.node_keys).await {
                 Ok(fresh) => {
                     *self.derp.write().await = Arc::new(fresh);
@@ -345,11 +352,11 @@ impl TailscaleBackhaul {
                 }
                 Err(e) => {
                     tracing::warn!(attempt, error = %e, "derp reconnect failed");
-                    tokio::time::sleep(Duration::from_secs(1 << attempt.min(4))).await;
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
                 }
             }
         }
-        tracing::error!("gave up reconnecting to derp; the relay path stays down until restart");
     }
 }
 
