@@ -20,7 +20,50 @@ const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
 
 pub struct TunDevice {
     fd: AsyncFd<OwnedFd>,
+    /// Kept so `Drop` can take the loopback alias back off again.
+    address: std::net::Ipv4Addr,
     pub name: String,
+}
+
+/// Give the mesh address a loopback path, so this node can reach its own mesh address.
+///
+/// macOS creates the `LOCAL` route that delivers a packet to the local stack only when an
+/// address is assigned to an interface. On a utun the point-to-point destination is our own
+/// address, and the interface route it produces takes the slot that `LOCAL` route would have
+/// had. The result is an address that is bindable and reachable from peers, but with no path
+/// from this machine to itself: `ping <our own address>` is written into the tunnel, and the
+/// daemon drops it because no *peer* owns it. Linux and Windows both hand us that path for
+/// free. Aliasing onto lo0 is what creates it here; no `route add` can, because the flag comes
+/// from assigning an address and nothing else.
+///
+/// Not fatal if it fails. Losing this costs the node a self-ping, which is a smoke test rather
+/// than a working mesh, and refusing to start over it would be a poor trade.
+fn alias_onto_loopback(address: std::net::Ipv4Addr, net: ipnet::Ipv4Net) {
+    // Clear whatever the mesh left on lo0 first, including this same address from a previous
+    // run: aliasing an address that is already there fails, and `Drop` never runs when the
+    // daemon is killed rather than shut down. A node that has since changed subnets would
+    // otherwise go on claiming an address it no longer holds, for as long as the machine is up.
+    match std::process::Command::new("ifconfig").arg("lo0").output() {
+        Ok(out) => {
+            for stale in utun::loopback_mesh_aliases(&String::from_utf8_lossy(&out.stdout), net) {
+                let _ = run("ifconfig", &["lo0", "-alias", &stale.to_string()]);
+            }
+        }
+        Err(e) => tracing::debug!(error = %e, "could not read lo0 to clear old mesh aliases"),
+    }
+
+    match run(
+        "ifconfig",
+        &["lo0", "alias", &address.to_string(), "255.255.255.255"],
+    ) {
+        Ok(()) => tracing::debug!(%address, "aliased onto lo0 for local delivery"),
+        Err(e) => tracing::warn!(
+            error = %e,
+            %address,
+            "could not alias the mesh address onto lo0; peers can still reach this node, but it \
+             cannot reach its own mesh address"
+        ),
+    }
 }
 
 impl TunDevice {
@@ -113,6 +156,9 @@ impl TunDevice {
         //
         // Address and MTU go in separate invocations. Combining them works on some releases and
         // not others, and a partly-applied ifconfig is harder to diagnose than two clear errors.
+        let net: ipnet::Ipv4Net = subnet
+            .parse()
+            .with_context(|| format!("{subnet} is not a valid IPv4 subnet"))?;
         let addr = address.to_string();
         run("ifconfig", &[&name, "inet", &addr, &addr, "up"])?;
         run("ifconfig", &[&name, "mtu", &MTU.to_string()])?;
@@ -122,10 +168,12 @@ impl TunDevice {
             &["-n", "delete", "-net", subnet, "-interface", &name],
         );
         run("route", &["-n", "add", "-net", subnet, "-interface", &name])?;
+        alias_onto_loopback(address, net);
 
         tracing::info!(name, %address, subnet, mtu = MTU, "utun interface up");
         Ok(Self {
             fd: AsyncFd::new(owned)?,
+            address,
             name,
         })
     }
@@ -190,5 +238,14 @@ impl TunDevice {
                 Err(_would_block) => continue,
             }
         }
+    }
+}
+
+impl Drop for TunDevice {
+    fn drop(&mut self) {
+        // The utun goes away with the fd, but a lo0 alias is machine state that outlives the
+        // process. Left behind, it makes this machine answer for a mesh address it no longer
+        // holds. Startup clears these too, since a killed daemon never gets here.
+        let _ = run("ifconfig", &["lo0", "-alias", &self.address.to_string()]);
     }
 }

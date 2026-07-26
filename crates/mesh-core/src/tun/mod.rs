@@ -86,6 +86,30 @@ pub(crate) mod utun {
         Some(&buf[HEADER_LEN..])
     }
 
+    /// Mesh addresses currently aliased onto loopback, from `ifconfig lo0` output.
+    ///
+    /// macOS only creates the `LOCAL` route that gives an address a loopback path when the
+    /// address is assigned to an interface, and on a utun the point-to-point destination takes
+    /// that slot instead, so we alias the mesh address onto lo0 to get one. Those aliases
+    /// outlive the process when it is killed rather than shut down, so startup clears whatever
+    /// is left inside the mesh subnet before adding the current address back. Anything outside
+    /// the subnet belongs to someone else and is left alone.
+    pub fn loopback_mesh_aliases(
+        ifconfig_lo0: &str,
+        net: ipnet::Ipv4Net,
+    ) -> Vec<std::net::Ipv4Addr> {
+        ifconfig_lo0
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                (f.next() == Some("inet")).then(|| f.next())?
+            })
+            .filter_map(|a| a.parse::<std::net::Ipv4Addr>().ok())
+            // Never touch 127.0.0.1, however absurd a subnet the user picked.
+            .filter(|a| !a.is_loopback() && net.contains(a))
+            .collect()
+    }
+
     /// Turn a requested interface name into a utun unit number.
     ///
     /// `sc_unit` is 1-based, so utun0 is unit 1. Zero asks the kernel for whatever is free,
@@ -166,6 +190,45 @@ mod tests {
         assert!(utun::strip(&[]).is_none());
         assert!(utun::strip(&utun::AF_INET_HEADER).is_none());
         assert!(utun::strip(&[0, 0, 0, 2, 0x45]).is_some());
+    }
+
+    /// Real `ifconfig lo0` output, with a mesh alias and an unrelated one.
+    const LO0: &str = "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+\toptions=1203<RXCSUM,TXCSUM,TXSTATUS,SW_TIMESTAMP>
+\tinet 127.0.0.1 netmask 0xff000000
+\tinet6 ::1 prefixlen 128
+\tinet6 fe80::1%lo0 prefixlen 64 scopeid 0x1
+\tinet 192.168.42.2 netmask 0xffffffff
+\tinet 10.4.4.4 netmask 0xffffffff
+\tnd6 options=201<PERFORMNUD,DAD>";
+
+    #[test]
+    fn finds_mesh_addresses_aliased_onto_loopback() {
+        let got = utun::loopback_mesh_aliases(LO0, "192.168.42.0/24".parse().unwrap());
+        assert_eq!(got, vec![std::net::Ipv4Addr::new(192, 168, 42, 2)]);
+    }
+
+    #[test]
+    fn leaves_loopback_and_other_peoples_aliases_alone() {
+        // 127.0.0.1 must survive even a subnet that contains it, and an alias outside the mesh
+        // subnet belongs to something else on the machine.
+        assert!(
+            utun::loopback_mesh_aliases(LO0, "127.0.0.0/8".parse().unwrap()).is_empty(),
+            "never unalias loopback itself"
+        );
+        let got = utun::loopback_mesh_aliases(LO0, "10.0.0.0/8".parse().unwrap());
+        assert_eq!(
+            got,
+            vec![std::net::Ipv4Addr::new(10, 4, 4, 4)],
+            "only what falls inside the subnet we were given"
+        );
+    }
+
+    #[test]
+    fn a_clean_loopback_has_nothing_to_remove() {
+        let clean = "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n\tinet 127.0.0.1 netmask 0xff000000";
+        assert!(utun::loopback_mesh_aliases(clean, "192.168.42.0/24".parse().unwrap()).is_empty());
+        assert!(utun::loopback_mesh_aliases("", "192.168.42.0/24".parse().unwrap()).is_empty());
     }
 
     #[test]
