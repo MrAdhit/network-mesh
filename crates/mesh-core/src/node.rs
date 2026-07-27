@@ -1,6 +1,7 @@
 //! The mesh node: owns both backhauls, races them, and picks a winner per peer.
 
 use anyhow::{Result, anyhow, bail};
+use futures_util::future::join_all;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -64,15 +65,77 @@ pub fn fingerprint(key: &PeerKey) -> String {
 /// Identifies one outstanding probe: which peer, which path, which sequence number.
 type ProbeKey = (PeerKey, PathKind, u64);
 
+/// One probe we are still waiting on.
+///
+/// `counts_as_loss` is false for a punch burst, which is fired blind at every candidate a peer
+/// advertised and is expected to go mostly unanswered. Charging that to the path would leave a
+/// direct link looking hopeless for the first seconds of its life, which is exactly when it has
+/// just started working.
+#[derive(Debug, Clone, Copy)]
+struct Outstanding {
+    sent_at: Instant,
+    counts_as_loss: bool,
+}
+
+impl Outstanding {
+    fn probe() -> Self {
+        Self {
+            sent_at: Instant::now(),
+            counts_as_loss: true,
+        }
+    }
+    fn speculative() -> Self {
+        Self {
+            sent_at: Instant::now(),
+            counts_as_loss: false,
+        }
+    }
+}
+
 /// How much weight a new sample gets in the smoothed RTT.
 const EWMA_ALPHA: f64 = 0.3;
 /// A path with no reply for this long is considered down.
 const PATH_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long an unanswered probe waits before it counts as lost.
+///
+/// Much shorter than `PATH_TIMEOUT`, because the two answer different questions. That one asks
+/// whether a path is a candidate at all and wants heavy hysteresis; this one asks how much of
+/// what a path carries actually arrives, and a single lost probe is a real data point even
+/// though it says nothing about liveness. It matches the reply timeout `meshd` gives `ping`, so
+/// a sample the CLI prints as a timeout is exactly one that counts against the path here.
+const PROBE_LOST_AFTER: Duration = Duration::from_secs(5);
+/// Longest one path's send may take before we give up on it and move on.
+///
+/// Every operation here that touches more than one path walks them from a single task, so a send
+/// with no bound does not merely fail its own path, it stops the others. That is how one broken
+/// backhaul used to take the whole mesh down: a relay send parked waiting for a reconnect, the
+/// probe loop parked behind it, every path's `last_reply` aged past `PATH_TIMEOUT` with no probe
+/// going out, and `ranked_paths` then reported a node with two healthy backhauls as unreachable.
+/// A backhaul that cannot accept a packet within this long is not carrying it anyway.
+const SEND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Hold one path's send to `SEND_TIMEOUT`.
+///
+/// Free-standing so the bound itself can be tested without a live backhaul underneath it.
+async fn bounded_send(
+    fut: impl std::future::Future<Output = Result<()>>,
+    path: PathKind,
+) -> Result<()> {
+    tokio::time::timeout(SEND_TIMEOUT, fut)
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("sending on {path} got no answer in {SEND_TIMEOUT:?}")))
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct PathStats {
     pub last_rtt_ms: Option<f64>,
     pub ewma_ms: Option<f64>,
+    /// Smoothed share of probes that went unanswered, 0.0 to 1.0.
+    ///
+    /// Kept apart from the `sent` and `received` counters, which are lifetime totals. A path
+    /// that had a bad minute an hour ago is not a lossy path now, and ranking has to answer for
+    /// the present.
+    pub loss_ewma: Option<f64>,
     pub sent: u64,
     pub received: u64,
     pub last_reply: Option<Instant>,
@@ -84,12 +147,33 @@ impl PathStats {
             .map(|t| t.elapsed() < PATH_TIMEOUT)
             .unwrap_or(false)
     }
-    pub fn loss_pct(&self) -> f64 {
-        if self.sent == 0 {
-            return 0.0;
-        }
-        100.0 * (1.0 - (self.received as f64 / self.sent as f64)).clamp(0.0, 1.0)
+
+    /// Smoothed recent loss as a fraction. Zero until something has actually been observed.
+    pub fn recent_loss(&self) -> f64 {
+        self.loss_ewma.unwrap_or(0.0)
     }
+
+    /// The same number as a percentage, which is what gets reported.
+    pub fn loss_pct(&self) -> f64 {
+        100.0 * self.recent_loss()
+    }
+
+    /// What this path is worth, lower being better.
+    ///
+    /// Smoothed RTT divided by the share of packets that survive the trip. Loss has to enter the
+    /// comparison somewhere and `ewma_ms` cannot carry it: `record` only ever runs on a reply, so
+    /// a path dropping half of what it carries reports exactly the latency of one dropping none,
+    /// and ranking on latency alone would keep choosing it forever. Dividing by the delivery rate
+    /// is the expected cost of getting a packet through, since at half loss it takes two tries on
+    /// average. A 2ms LAN path at 40% loss then scores 3.3ms and still beats a clean 16ms relay,
+    /// which is right, and at 90% it scores 20ms and loses, which is also right.
+    pub fn score(&self) -> Option<f64> {
+        // Floored, so a path that answers nothing still sorts against its peers instead of
+        // producing an infinity that compares equal to every other hopeless path.
+        let delivered = (1.0 - self.recent_loss()).max(0.05);
+        self.ewma_ms.map(|ms| ms / delivered)
+    }
+
     fn record(&mut self, rtt: Duration) {
         let ms = rtt.as_secs_f64() * 1000.0;
         self.last_rtt_ms = Some(ms);
@@ -99,6 +183,15 @@ impl PathStats {
         });
         self.received += 1;
         self.last_reply = Some(Instant::now());
+        self.record_loss(0.0);
+    }
+
+    /// Feed one probe outcome into the loss average: 0.0 answered, 1.0 lost.
+    fn record_loss(&mut self, lost: f64) {
+        self.loss_ewma = Some(match self.loss_ewma {
+            Some(prev) => prev * (1.0 - EWMA_ALPHA) + lost * EWMA_ALPHA,
+            None => lost,
+        });
     }
 }
 
@@ -167,7 +260,12 @@ pub fn remember_candidate(
     true
 }
 
-/// Paths that are actually carrying traffic to a peer, fastest first.
+/// Paths that are actually carrying traffic to a peer, best first.
+///
+/// Best is `PathStats::score`, not raw latency. Ranking on latency alone meant a path never paid
+/// for what it dropped: losses never reach `ewma_ms`, and a path that answers even some of its
+/// probes never trips the liveness timeout either, so a LAN link losing half of everything sat
+/// at the top of the list indefinitely reporting two milliseconds.
 ///
 /// Only live paths. A path with no recent reply is not a worse option, it is not an option: we
 /// have no evidence it goes anywhere, and sending into one is guessing. When nothing is live
@@ -187,8 +285,8 @@ pub fn rank_paths(paths: Vec<PathKind>, stats: &BTreeMap<PathKind, PathStats>) -
         .filter(|k| stats.get(k).map(|s| s.up()).unwrap_or(false))
         .collect();
     live.sort_by(|a, b| {
-        let ms = |k: &PathKind| stats.get(k).and_then(|s| s.ewma_ms).unwrap_or(f64::MAX);
-        ms(a).total_cmp(&ms(b))
+        let score = |k: &PathKind| stats.get(k).and_then(|s| s.score()).unwrap_or(f64::MAX);
+        score(a).total_cmp(&score(b))
     });
     live
 }
@@ -212,12 +310,12 @@ impl PeerState {
             .flatten()
     }
 
-    /// Lowest smoothed RTT among paths that are currently up.
+    /// Best path currently up, scored the same way `rank_paths` scores them so the two agree.
     pub fn best_path(&self) -> Option<(PathKind, f64)> {
         self.paths
             .iter()
             .filter(|(_, s)| s.up())
-            .filter_map(|(k, s)| s.ewma_ms.map(|ms| (*k, ms)))
+            .filter_map(|(k, s)| s.score().map(|v| (*k, v)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 }
@@ -246,7 +344,7 @@ pub struct MeshNode {
     nat: Arc<RwLock<Option<crate::nat::NatProfile>>>,
     peers: Arc<RwLock<BTreeMap<PeerKey, PeerState>>>,
     /// Probes we are still waiting on, keyed by (peer, path, seq).
-    inflight: Arc<Mutex<BTreeMap<ProbeKey, Instant>>>,
+    inflight: Arc<Mutex<BTreeMap<ProbeKey, Outstanding>>>,
     /// One-shot channels for `ping`, which needs individual samples rather than an average.
     waiters: Arc<Mutex<BTreeMap<ProbeKey, tokio::sync::oneshot::Sender<Duration>>>>,
     seq: AtomicU64,
@@ -530,6 +628,15 @@ impl MeshNode {
         Ok(())
     }
 
+    /// `send_on` with a deadline. Every caller should use this rather than `send_on` directly.
+    ///
+    /// The bound is a guard, not the mechanism: a backhaul is expected to fail a send rather
+    /// than block on one. It is here because a single blocking send is enough to disable paths
+    /// that have nothing to do with it, and it does so silently.
+    async fn send_bounded(&self, peer: &PeerKey, path: PathKind, frame: &Frame) -> Result<()> {
+        bounded_send(self.send_on(peer, path, frame), path).await
+    }
+
     /// Fire one probe per peer per available path and record it as in flight.
     pub async fn probe_round(self: &Arc<Self>) {
         let peers: Vec<PeerKey> = self.peers.read().await.keys().copied().collect();
@@ -537,6 +644,7 @@ impl MeshNode {
         // Re-greet anyone whose Cloudflare address we still do not have. Without this a node
         // that started first greets an absent peer, then sits out the full announcement
         // interval before trying again, and the Cloudflare path reads as 100% loss meanwhile.
+        let mut regreet = Vec::new();
         for peer in &peers {
             let unknown = self
                 .peers
@@ -546,45 +654,83 @@ impl MeshNode {
                 .map(|p| p.cf_ip.is_none())
                 .unwrap_or(false);
             if unknown && self.cf().is_some() {
-                self.hello_to(peer, true).await;
+                regreet.push(*peer);
             }
         }
+        join_all(regreet.iter().map(|p| self.hello_to(p, true))).await;
 
-        for peer in peers {
-            for path in self.paths_for(&peer).await {
-                let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                let frame = Frame::new(MsgType::Probe, path, seq, &self.name, self.self_key);
-                match self.send_on(&peer, path, &frame).await {
-                    Ok(()) => {
-                        self.inflight
-                            .lock()
-                            .await
-                            .insert((peer, path, seq), Instant::now());
-                        if let Some(p) = self.peers.write().await.get_mut(&peer) {
-                            p.paths.entry(path).or_default().sent += 1;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(peer = %fingerprint(&peer), %path, error = %e, "probe not sent");
-                    }
-                }
+        // Every probe goes out concurrently, across peers and paths alike. In series each path
+        // waited out the one before it, so a merely slow backhaul delayed the liveness of the
+        // healthy ones, and a blocked one stopped the round outright.
+        let mut work = Vec::new();
+        for peer in &peers {
+            for path in self.paths_for(peer).await {
+                work.push(self.probe_one(*peer, path));
             }
         }
+        join_all(work).await;
         self.expire_inflight().await;
     }
 
+    /// One probe on one path, recorded as in flight if it actually went out.
+    async fn probe_one(&self, peer: PeerKey, path: PathKind) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let frame = Frame::new(MsgType::Probe, path, seq, &self.name, self.self_key);
+        match self.send_bounded(&peer, path, &frame).await {
+            Ok(()) => {
+                self.inflight
+                    .lock()
+                    .await
+                    .insert((peer, path, seq), Outstanding::probe());
+                if let Some(p) = self.peers.write().await.get_mut(&peer) {
+                    p.paths.entry(path).or_default().sent += 1;
+                }
+            }
+            Err(e) => {
+                tracing::debug!(peer = %fingerprint(&peer), %path, error = %e, "probe not sent");
+            }
+        }
+    }
+
+    /// Retire probes that have waited long enough to count as lost, and charge each one to the
+    /// path that swallowed it.
+    ///
+    /// This is the only place a loss is ever observed. Nothing else notices one: an unanswered
+    /// probe simply sits in the table, so without this a path that drops traffic is
+    /// indistinguishable from one that does not.
     async fn expire_inflight(&self) {
-        let mut w = self.inflight.lock().await;
-        w.retain(|_, sent| sent.elapsed() < PATH_TIMEOUT);
+        let lost: Vec<ProbeKey> = {
+            let mut w = self.inflight.lock().await;
+            let expired: Vec<(ProbeKey, bool)> = w
+                .iter()
+                .filter(|(_, o)| o.sent_at.elapsed() >= PROBE_LOST_AFTER)
+                .map(|(k, o)| (*k, o.counts_as_loss))
+                .collect();
+            for (k, _) in &expired {
+                w.remove(k);
+            }
+            expired
+                .into_iter()
+                .filter(|(_, counts)| *counts)
+                .map(|(k, _)| k)
+                .collect()
+        };
+        if lost.is_empty() {
+            return;
+        }
+        let mut w = self.peers.write().await;
+        for (peer, path, _) in lost {
+            if let Some(p) = w.get_mut(&peer) {
+                p.paths.entry(path).or_default().record_loss(1.0);
+            }
+        }
     }
 
     /// Announce our own per-backhaul addresses so peers can reach us on paths they have not
     /// been told about. Bootstrapping: whichever path is up teaches the peer about the others.
     pub async fn send_hello(self: &Arc<Self>) {
         let peers: Vec<PeerKey> = self.peers.read().await.keys().copied().collect();
-        for peer in peers {
-            self.hello_to(&peer, true).await;
-        }
+        join_all(peers.iter().map(|p| self.hello_to(p, true))).await;
     }
 
     /// Greet one peer. `want_reply` asks them to greet us back, which is what makes discovery
@@ -617,11 +763,17 @@ impl MeshNode {
         } else {
             HELLO_REPLY
         };
-        for path in self.paths_for(peer).await {
-            let f = Frame::new(MsgType::Hello, path, seq, &self.name, self.self_key)
-                .with_payload(payload.clone());
-            let _ = self.send_on(peer, path, &f).await;
-        }
+        let frames: Vec<(PathKind, Frame)> = self
+            .paths_for(peer)
+            .await
+            .into_iter()
+            .map(|path| {
+                let f = Frame::new(MsgType::Hello, path, seq, &self.name, self.self_key)
+                    .with_payload(payload.clone());
+                (path, f)
+            })
+            .collect();
+        join_all(frames.iter().map(|(p, f)| self.send_bounded(peer, *p, f))).await;
     }
 
     async fn handle_frame(
@@ -675,7 +827,7 @@ impl MeshNode {
             self.inflight
                 .lock()
                 .await
-                .insert((*peer, PathKind::Direct, seq), Instant::now());
+                .insert((*peer, PathKind::Direct, seq), Outstanding::speculative());
             for addr in &candidates {
                 let _ = transport.send_to(*addr, &bytes).await;
             }
@@ -708,11 +860,16 @@ impl MeshNode {
         };
 
         // Relays only. A punch request that needed the direct path would be circular.
-        for path in self.available_paths() {
-            let f = Frame::new(MsgType::Punch, path, seq, &self.name, self.self_key)
-                .with_payload(payload.clone());
-            let _ = self.send_on(peer, path, &f).await;
-        }
+        let frames: Vec<(PathKind, Frame)> = self
+            .available_paths()
+            .into_iter()
+            .map(|path| {
+                let f = Frame::new(MsgType::Punch, path, seq, &self.name, self.self_key)
+                    .with_payload(payload.clone());
+                (path, f)
+            })
+            .collect();
+        join_all(frames.iter().map(|(p, f)| self.send_bounded(peer, *p, f))).await;
         // Our own burst goes to observed addresses only: at this point we have no evidence the
         // peer's socket is up, so a guess here could poison it.
         self.punch_at(peer, false).await;
@@ -882,15 +1039,15 @@ impl MeshNode {
                     &self.name,
                     self.self_key,
                 );
-                if let Err(e) = self.send_on(&frame.sender_key, arrived_on, &reply).await {
+                if let Err(e) = self.send_bounded(&frame.sender_key, arrived_on, &reply).await {
                     tracing::debug!(peer = %frame.sender, error = %e, "probe reply failed");
                 }
             }
             MsgType::ProbeReply => {
                 let key = (frame.sender_key, frame.path, frame.seq);
-                let sent_at = self.inflight.lock().await.remove(&key);
-                if let Some(sent_at) = sent_at {
-                    let rtt = sent_at.elapsed();
+                let outstanding = self.inflight.lock().await.remove(&key);
+                if let Some(outstanding) = outstanding {
+                    let rtt = outstanding.sent_at.elapsed();
                     if let Some(p) = self.peers.write().await.get_mut(&frame.sender_key) {
                         p.paths.entry(frame.path).or_default().record(rtt);
                     }
@@ -1009,7 +1166,7 @@ impl MeshNode {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let frame =
             Frame::new(MsgType::Data, path, seq, &self.name, self.self_key).with_payload(payload);
-        self.send_on(peer, path, &frame).await?;
+        self.send_bounded(peer, path, &frame).await?;
         Ok(path)
     }
 
@@ -1030,10 +1187,10 @@ impl MeshNode {
                 let key = (*peer, path, seq);
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 self.waiters.lock().await.insert(key, tx);
-                self.inflight.lock().await.insert(key, Instant::now());
+                self.inflight.lock().await.insert(key, Outstanding::probe());
 
                 let frame = Frame::new(MsgType::Probe, path, seq, &self.name, self.self_key);
-                if self.send_on(peer, path, &frame).await.is_err() {
+                if self.send_bounded(peer, path, &frame).await.is_err() {
                     self.waiters.lock().await.remove(&key);
                     self.inflight.lock().await.remove(&key);
                     out.push((path, i, None));
@@ -1125,7 +1282,7 @@ impl MeshNode {
             // Only the label changes between attempts, so a failover re-labels the frame we
             // already built rather than copying the packet again.
             frame.path = path;
-            match self.send_on(peer, path, &frame).await {
+            match self.send_bounded(peer, path, &frame).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     tracing::debug!(peer = %fingerprint(peer), ?path, error = %e, "path send failed, trying the next");
@@ -1302,6 +1459,14 @@ mod tests {
         }
     }
 
+    /// Answering, and fast, but dropping `loss` of what it carries.
+    fn lossy(ms: f64, loss: f64) -> PathStats {
+        PathStats {
+            loss_ewma: Some(loss),
+            ..live(ms)
+        }
+    }
+
     #[test]
     fn the_fastest_live_path_wins() {
         let stats = BTreeMap::from([
@@ -1373,6 +1538,112 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn a_lossy_path_has_to_be_much_faster_to_keep_winning() {
+        // Loss never reaches `ewma_ms`, because `record` only runs on a reply, and a path that
+        // answers some of its probes never trips `PATH_TIMEOUT` either. So on latency alone a
+        // LAN link dropping most of what it carries reported 2ms and stayed the winner forever.
+        let clean_relay_loses = BTreeMap::from([
+            (PathKind::CloudflareMesh, live(16.0)),
+            (PathKind::Direct, lossy(2.0, 0.4)),
+        ]);
+        assert_eq!(
+            rank_paths(
+                vec![PathKind::CloudflareMesh, PathKind::Direct],
+                &clean_relay_loses
+            ),
+            vec![PathKind::Direct, PathKind::CloudflareMesh],
+            "3.3ms of expected cost still beats a clean 16ms, and should"
+        );
+
+        let clean_relay_wins = BTreeMap::from([
+            (PathKind::CloudflareMesh, live(16.0)),
+            (PathKind::Direct, lossy(2.0, 0.9)),
+        ]);
+        assert_eq!(
+            rank_paths(
+                vec![PathKind::CloudflareMesh, PathKind::Direct],
+                &clean_relay_wins
+            ),
+            vec![PathKind::CloudflareMesh, PathKind::Direct],
+            "at 90% loss a packet costs 20ms and the relay has to take over"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_is_never_answered_is_charged_to_its_path() {
+        let node = MeshNode::new("me".into(), [9u8; 32], None, None, None, None);
+        node.apply_roster(&[roster_entry("peer", "192.168.42.2", 1)])
+            .await;
+        node.inflight.lock().await.insert(
+            ([1u8; 32], PathKind::Direct, 1),
+            Outstanding {
+                sent_at: Instant::now() - PROBE_LOST_AFTER * 2,
+                counts_as_loss: true,
+            },
+        );
+        node.expire_inflight().await;
+
+        assert!(
+            node.inflight.lock().await.is_empty(),
+            "an expired probe has to be retired"
+        );
+        let peer = node.peer(&[1u8; 32]).await.unwrap();
+        assert!(
+            peer.paths[&PathKind::Direct].recent_loss() > 0.0,
+            "and has to reach the loss average, or nothing ever observes a drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_punch_burst_going_unanswered_is_not_held_against_the_path() {
+        // A punch is fired blind at every candidate a peer advertised, so most of it is expected
+        // to land nowhere. Counting that would leave a direct path looking hopeless for its
+        // first seconds, which is exactly when it has just started working.
+        let node = MeshNode::new("me".into(), [9u8; 32], None, None, None, None);
+        node.apply_roster(&[roster_entry("peer", "192.168.42.2", 1)])
+            .await;
+        node.inflight.lock().await.insert(
+            ([1u8; 32], PathKind::Direct, 1),
+            Outstanding {
+                sent_at: Instant::now() - PROBE_LOST_AFTER * 2,
+                counts_as_loss: false,
+            },
+        );
+        node.expire_inflight().await;
+
+        assert!(node.inflight.lock().await.is_empty(), "still retired");
+        let peer = node.peer(&[1u8; 32]).await.unwrap();
+        assert_eq!(peer.paths[&PathKind::Direct].recent_loss(), 0.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_send_that_never_returns_is_failed_rather_than_waited_on() {
+        // The regression. A relay send used to await its own reconnect, so during an outage it
+        // did not fail, it parked. The probe loop parked behind it, no probe went out on any
+        // path, and fifteen seconds later a node with two healthy backhauls called every peer
+        // unreachable. Nothing here may outlive SEND_TIMEOUT.
+        let start = tokio::time::Instant::now();
+        let r = bounded_send(
+            std::future::pending::<Result<()>>(),
+            PathKind::TailscaleDerp,
+        )
+        .await;
+        assert!(r.is_err(), "a send that never answers has to fail");
+        assert_eq!(start.elapsed(), SEND_TIMEOUT, "and fail on time");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_send_that_answers_in_time_is_left_alone() {
+        assert!(
+            bounded_send(async { Ok(()) }, PathKind::Direct).await.is_ok(),
+            "the bound must not interfere with a working path"
+        );
+        // A path's own failure is what the caller needs to see, not the deadline's.
+        let e = bounded_send(async { Err(anyhow!("no route")) }, PathKind::Direct).await;
+        assert_eq!(e.unwrap_err().to_string(), "no route");
     }
 
     fn addr(s: &str) -> std::net::SocketAddr {

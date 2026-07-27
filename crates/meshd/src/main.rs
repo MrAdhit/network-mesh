@@ -290,10 +290,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    // One second. Probing is what every path decision is made from, and the round now fans out
+    // rather than walking the paths in series, so the cost of asking more often is a packet per
+    // path per peer rather than a longer round.
     let interval = std::env::var("MESH_PROBE_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(2);
+        .unwrap_or(1);
     node.start(Duration::from_secs(interval));
 
     // Keep this machine's binaries current. The daemon does the CLI as well as itself: they are

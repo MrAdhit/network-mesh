@@ -295,21 +295,35 @@ impl TailscaleBackhaul {
         matches.first().map(|p| (*p).clone())
     }
 
-    pub async fn send_to(&self, peer: &NodePublicKey, msg: &[u8]) -> Result<()> {
+    /// Relay one message, failing rather than waiting when the connection is broken.
+    ///
+    /// This used to retry across a fresh connection, which meant awaiting `reconnect`, which
+    /// retries until it succeeds. So a send during an outage did not fail, it parked for the
+    /// length of the outage. That is the wrong trade for these callers: the probe loop and the
+    /// TUN reader each walk every path from a single task, so a send that parks takes the paths
+    /// behind it with it. Probing then stops altogether, every path ages past `PATH_TIMEOUT`,
+    /// and a node whose other backhauls were healthy throughout starts rejecting traffic as
+    /// unreachable. Handing the replacement to a background task keeps the failure to this one
+    /// path, and the caller comes back on its own timer once the relay is up.
+    pub async fn send_to(self: &Arc<Self>, peer: &NodePublicKey, msg: &[u8]) -> Result<()> {
         let client = self.derp.read().await.clone();
         match client.send_one(*peer, msg).await {
             Ok(()) => Ok(()),
-            Err(first) => {
-                // One retry across a fresh connection. A relay that dropped us mid-send is
-                // ordinary; giving up on it permanently is not.
-                self.reconnect(&client).await;
-                let client = self.derp.read().await.clone();
-                client
-                    .send_one(*peer, msg)
-                    .await
-                    .map_err(|e| anyhow!("derp send failed after reconnect: {e} (first: {first})"))
+            Err(e) => {
+                self.replace_in_background(&client);
+                Err(anyhow!("derp send failed: {e}; replacing the connection"))
             }
         }
+    }
+
+    /// Start replacing a broken connection without making the caller wait for the result.
+    ///
+    /// `reconnect` still does the work and still deduplicates, so a burst of failed sends
+    /// produces one replacement rather than one per send.
+    fn replace_in_background(self: &Arc<Self>, stale: &Arc<ts_derp::DefaultClient>) {
+        let me = self.clone();
+        let stale = stale.clone();
+        tokio::spawn(async move { me.reconnect(&stale).await });
     }
 
     /// Blocks until a peer relays us something, reconnecting as needed.

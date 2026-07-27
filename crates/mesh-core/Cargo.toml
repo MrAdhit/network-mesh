@@ -42,5 +42,8 @@ libc = "0.2"
 wintun = "0.5"
 
 [dev-dependencies]
+# `test-util` is the paused clock, which is how the send deadline is tested without
+# spending real seconds on it.
+tokio = { workspace = true, features = ["test-util"] }
 webpki-roots = "1"
 tracing-subscriber = { workspace = true }
