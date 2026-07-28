@@ -44,6 +44,17 @@ pub enum Request {
     Ping { peer: String, count: u32 },
     /// Send application data over the currently winning path.
     Send { peer: String, data: String },
+    /// Join a network with an enrollment key, or rejoin after being removed.
+    ///
+    /// Handed to the daemon rather than read from its environment, because the daemon is
+    /// normally started by the service manager at boot and nobody is there to put a key in its
+    /// environment at the moment it needs one.
+    Join { key: String },
+    /// Deregister from the control plane and stop.
+    ///
+    /// The daemon does this itself because it holds the node token; an operator running
+    /// `remove-node` needs an account session the machine being uninstalled does not have.
+    Leave,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +63,21 @@ pub enum Response {
     Status(StatusReport),
     Peers(Vec<PeerReport>),
     Ping(Vec<PingSample>),
-    Sent { path: String, bytes: usize },
+    Sent {
+        path: String,
+        bytes: usize,
+    },
+    Joined {
+        node_id: String,
+        virtual_ip: String,
+        subnet: String,
+    },
+    Left {
+        node_id: String,
+        /// Anything the operator needs to know, such as the control plane being unreachable and
+        /// the record therefore still existing. Empty when it all worked.
+        detail: String,
+    },
     Ok,
     Error(String),
 }
@@ -60,12 +85,23 @@ pub enum Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusReport {
     pub node_name: String,
+    /// False while the daemon is up but has not joined a network yet. Everything below is
+    /// meaningless in that state, so the CLI stops reading after this.
+    ///
+    /// Defaulted to true so a newer CLI does not report an older daemon, which always answered
+    /// only when enrolled, as unenrolled.
+    #[serde(default = "yes")]
+    pub enrolled: bool,
     pub virtual_ip: String,
     pub subnet: String,
     pub cloudflare: Option<BackhaulReport>,
     pub tailscale: Option<BackhaulReport>,
     pub peer_count: usize,
     pub uptime_secs: u64,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -123,7 +123,11 @@ async fn bounded_send(
 ) -> Result<()> {
     tokio::time::timeout(SEND_TIMEOUT, fut)
         .await
-        .unwrap_or_else(|_| Err(anyhow!("sending on {path} got no answer in {SEND_TIMEOUT:?}")))
+        .unwrap_or_else(|_| {
+            Err(anyhow!(
+                "sending on {path} got no answer in {SEND_TIMEOUT:?}"
+            ))
+        })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1039,7 +1043,10 @@ impl MeshNode {
                     &self.name,
                     self.self_key,
                 );
-                if let Err(e) = self.send_bounded(&frame.sender_key, arrived_on, &reply).await {
+                if let Err(e) = self
+                    .send_bounded(&frame.sender_key, arrived_on, &reply)
+                    .await
+                {
                     tracing::debug!(peer = %frame.sender, error = %e, "probe reply failed");
                 }
             }
@@ -1638,7 +1645,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_send_that_answers_in_time_is_left_alone() {
         assert!(
-            bounded_send(async { Ok(()) }, PathKind::Direct).await.is_ok(),
+            bounded_send(async { Ok(()) }, PathKind::Direct)
+                .await
+                .is_ok(),
             "the bound must not interfere with a working path"
         );
         // A path's own failure is what the caller needs to see, not the deadline's.

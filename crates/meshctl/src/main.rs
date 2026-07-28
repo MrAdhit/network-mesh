@@ -1,7 +1,9 @@
 //! meshctl: talks to meshd over its unix socket.
 
 use anyhow::{Context, Result, bail};
+use mesh_core::config::CliConfig;
 use mesh_core::ipc::{Request, Response, call, default_endpoint};
+use mesh_core::util::{now_unix, rfc3339};
 
 const USAGE: &str = "\
 meshctl - control the mesh daemon and its network
@@ -11,10 +13,14 @@ LOCAL NODE:
     meshctl peers                       peer table with per-path RTT
     meshctl ping <peer> [count]         probe every path separately
     meshctl send <peer> <message...>    send data over the winning path
+    meshctl join <enrollment-key>       join a network, or rejoin after removal
+    meshctl leave                       deregister from the network and stop
 
 NETWORK (talks to the control plane):
-    meshctl signup <email> <password> [subnet]
-    meshctl login <email> <password>
+    meshctl signup <email> [password] [subnet]
+    meshctl login <email> [password]    stores the session; no exporting needed
+    meshctl logout                      forget the stored session
+    meshctl whoami                      which account this machine acts as
     meshctl network                     subnet, node count, backhaul status
     meshctl set-subnet <cidr>           only while no nodes are enrolled
     meshctl set-cloudflare <api-token> <account-id>
@@ -25,11 +31,13 @@ NETWORK (talks to the control plane):
 
 SELF:
     meshctl update                      replace local binaries with the control plane's
+    meshctl version                     version, build and target
 
 ENVIRONMENT:
     MESH_SOCKET    daemon endpoint (unix: a socket path, windows: a named pipe)
-    MESH_CP_URL    control plane base URL; overrides the one compiled in
-    MESH_SESSION   session token; `login` and `signup` print one to export
+    MESH_CP_URL    control plane base URL; overrides the stored and compiled-in ones
+    MESH_SESSION   session token; overrides the stored one
+    MESH_CONFIG    where the session is stored; defaults to the usual per-user place
     MESH_AUTOUPDATE  set to 0 to switch off update checks entirely
 ";
 
@@ -41,11 +49,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if matches!(args[0].as_str(), "version" | "--version" | "-V") {
+        println!("{}", mesh_core::util::version_line("meshctl"));
+        return Ok(());
+    }
+
     // Network commands talk to the control plane over HTTP; the rest talk to the local daemon.
     if matches!(
         args[0].as_str(),
         "signup"
             | "login"
+            | "logout"
+            | "whoami"
             | "network"
             | "set-subnet"
             | "set-cloudflare"
@@ -89,12 +104,25 @@ async fn main() -> Result<()> {
                 data: args[2..].join(" "),
             }
         }
+        "join" => {
+            if args.len() < 2 {
+                bail!("join needs an enrollment key; mint one with `meshctl enrollment-key`");
+            }
+            Request::Join {
+                key: args[1].clone(),
+            }
+        }
+        "leave" => Request::Leave,
         other => bail!("unknown command {other:?}\n\n{USAGE}"),
     };
 
     match call(&endpoint, &req).await? {
         Response::Status(s) => {
             println!("node       {}", s.node_name);
+            if !s.enrolled {
+                println!("state      not enrolled; run `meshctl join <enrollment-key>`");
+                return Ok(());
+            }
             println!("address    {}  in {}", s.virtual_ip, s.subnet);
             println!("uptime     {}s", s.uptime_secs);
             println!("peers      {}", s.peer_count);
@@ -187,6 +215,20 @@ async fn main() -> Result<()> {
             }
         }
         Response::Sent { path, bytes } => println!("sent {bytes} bytes over {path}"),
+        Response::Joined {
+            node_id,
+            virtual_ip,
+            subnet,
+        } => {
+            println!("joined as {node_id}");
+            println!("address   {virtual_ip} in {subnet}");
+        }
+        Response::Left { node_id, detail } => {
+            println!("left the network; {node_id} is gone and its address is free");
+            if !detail.is_empty() {
+                println!("{detail}");
+            }
+        }
         Response::Ok => println!("ok"),
         Response::Error(e) => {
             eprintln!("error: {e}");
@@ -202,23 +244,67 @@ fn fmt_ms(v: Option<f64>) -> String {
 
 // ---- control plane ----
 
-/// Same precedence as the daemon, minus the enrollment step: meshctl has no registration of
-/// its own, so it is the runtime environment, then whatever was baked in, then a local
-/// control plane for development.
-fn cp_url() -> String {
+/// Same precedence as the daemon, with the stored login standing in for the enrollment the CLI
+/// does not have: the runtime environment, then whichever control plane we logged in to, then
+/// whatever was baked in, then a local one for development.
+fn cp_url_with(cfg: Option<&CliConfig>) -> String {
     let runtime = std::env::var("MESH_CP_URL").ok();
-    mesh_core::state::resolve_cp_url(runtime.as_deref(), None, mesh_core::state::COMPILED_CP_URL)
-        .map(|(url, _)| url)
-        .unwrap_or_else(|| "http://127.0.0.1:8080".into())
+    mesh_core::state::resolve_cp_url(
+        runtime.as_deref(),
+        cfg.map(|c| c.cp_url.as_str()),
+        mesh_core::state::COMPILED_CP_URL,
+    )
+    .map(|(url, _)| url)
+    .unwrap_or_else(|| "http://127.0.0.1:8080".into())
 }
 
-fn session() -> Result<String> {
-    std::env::var("MESH_SESSION")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!("not logged in: run `meshctl login` and export MESH_SESSION")
-        })
+/// For the paths that only need a URL. A broken config file is ignored here rather than fatal:
+/// updating should still work when the thing that is wrong is the session.
+fn cp_url() -> String {
+    cp_url_with(CliConfig::load().ok().flatten().as_ref())
+}
+
+/// The session to present, and a useful sentence when there is not one.
+///
+/// `MESH_SESSION` still wins, because an operator setting it means it now, and scripts and CI
+/// depend on it. Everything else comes from the stored login, and only when it belongs to the
+/// control plane being addressed.
+fn session(cfg: Option<&CliConfig>, base: &str) -> Result<String> {
+    if let Ok(v) = std::env::var("MESH_SESSION")
+        && !v.is_empty()
+    {
+        return Ok(v);
+    }
+    let cfg = cfg.ok_or_else(|| anyhow::anyhow!("not logged in: run `meshctl login <email>`"))?;
+    if let Some(token) = cfg.session_for(base) {
+        if cfg.expired(now_unix()) {
+            bail!(
+                "the stored session expired on {}; run `meshctl login <email>`",
+                rfc3339(cfg.expires_at.unwrap_or_default())
+            );
+        }
+        return Ok(token.to_string());
+    }
+    if !cfg.session_token.is_empty() {
+        bail!(
+            "logged in to {}, but this command is aimed at {base}. Log in there, or clear \
+             MESH_CP_URL to use the one you logged in to",
+            cfg.cp_url
+        );
+    }
+    bail!("not logged in: run `meshctl login <email>`")
+}
+
+/// Read a password without echoing it.
+///
+/// Prompting is the default and passing one as an argument is the fallback, because an argument
+/// lands in shell history and is visible in `ps` to every other user on the machine.
+fn ask_password(prompt: &str) -> Result<String> {
+    let pw = rpassword::prompt_password(prompt).context("reading a password from the terminal")?;
+    if pw.is_empty() {
+        bail!("no password given");
+    }
+    Ok(pw)
 }
 
 /// Unwrap the control plane's reply, preferring its own error text over a status code.
@@ -314,22 +400,38 @@ async fn notice_if_stale() {
 
 async fn control_plane(args: &[String]) -> Result<()> {
     use mesh_core::cp::*;
-    let base = cp_url();
+    // Loaded once and shared: the URL and the session come from the same record on purpose.
+    let cfg = CliConfig::load()?;
+    let base = cp_url_with(cfg.as_ref());
+    let auth = || session(cfg.as_ref(), &base);
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()?;
 
     match args[0].as_str() {
         "signup" | "login" => {
-            if args.len() < 3 {
-                bail!("{} needs an email and a password", args[0]);
+            if args.len() < 2 {
+                bail!("{} needs an email address", args[0]);
             }
+            let email = args[1].clone();
+            let password = match args.get(2) {
+                Some(p) => p.clone(),
+                None => {
+                    let pw = ask_password("password: ")?;
+                    // A mistyped password at signup is unrecoverable: there is no reset, and the
+                    // account it creates is one nobody can log in to.
+                    if args[0] == "signup" && ask_password("password again: ")? != pw {
+                        bail!("those did not match");
+                    }
+                    pw
+                }
+            };
             let (path, body) = if args[0] == "signup" {
                 (
                     "/v1/accounts",
                     serde_json::to_value(SignupRequest {
-                        email: args[1].clone(),
-                        password: args[2].clone(),
+                        email: email.clone(),
+                        password,
                         subnet: args.get(3).cloned(),
                     })?,
                 )
@@ -337,8 +439,8 @@ async fn control_plane(args: &[String]) -> Result<()> {
                 (
                     "/v1/sessions",
                     serde_json::to_value(LoginRequest {
-                        email: args[1].clone(),
-                        password: args[2].clone(),
+                        email: email.clone(),
+                        password,
                     })?,
                 )
             };
@@ -349,13 +451,58 @@ async fn control_plane(args: &[String]) -> Result<()> {
                     .await?,
             )
             .await?;
+            let stored = CliConfig {
+                cp_url: base.clone(),
+                session_token: r.session_token,
+                account_id: r.account_id.clone(),
+                email: Some(email),
+                expires_at: (r.expires_at > 0).then_some(r.expires_at),
+            }
+            .save()?;
             println!("account {}", r.account_id);
-            println!("\nexport MESH_SESSION={}", r.session_token);
+            println!("session stored in {}", stored.display());
+            if r.expires_at > 0 {
+                println!("expires {}", rfc3339(r.expires_at));
+            }
         }
+        "logout" => match CliConfig::clear()? {
+            Some(path) => {
+                println!("removed {}", path.display());
+                if std::env::var("MESH_SESSION").is_ok_and(|v| !v.is_empty()) {
+                    println!("MESH_SESSION is still set in this shell and overrides the file");
+                }
+            }
+            None => println!("no stored session"),
+        },
+        "whoami" => match cfg.as_ref().filter(|c| !c.session_token.is_empty()) {
+            Some(c) => {
+                println!("account       {}", c.account_id);
+                if let Some(e) = &c.email {
+                    println!("email         {e}");
+                }
+                println!("control plane {}", c.cp_url);
+                match c.expires_at {
+                    Some(e) if c.expired(now_unix()) => {
+                        println!("session       expired {}", rfc3339(e))
+                    }
+                    Some(e) => println!("session       valid until {}", rfc3339(e)),
+                    None => println!("session       stored"),
+                }
+                if !mesh_core::config::same_cp(&c.cp_url, &base) {
+                    println!(
+                        "\nnote: commands are aimed at {base}, which is not where this session is from"
+                    );
+                }
+            }
+            None if std::env::var("MESH_SESSION").is_ok_and(|v| !v.is_empty()) => {
+                println!("using MESH_SESSION from the environment, against {base}");
+            }
+            None => println!("not logged in"),
+        },
         "network" => {
             let r: NetworkView = unwrap_cp(
                 http.get(format!("{base}/v1/network"))
-                    .header(SESSION_HEADER, session()?)
+                    .header(SESSION_HEADER, auth()?)
                     .send()
                     .await?,
             )
@@ -389,7 +536,7 @@ async fn control_plane(args: &[String]) -> Result<()> {
             }
             let r: NetworkView = unwrap_cp(
                 http.patch(format!("{base}/v1/network"))
-                    .header(SESSION_HEADER, session()?)
+                    .header(SESSION_HEADER, auth()?)
                     .json(&SetSubnetRequest {
                         subnet: args[1].clone(),
                     })
@@ -406,7 +553,7 @@ async fn control_plane(args: &[String]) -> Result<()> {
             println!("provisioning the Zero Trust org, this takes a few seconds...");
             let r: BackhaulStatus = unwrap_cp(
                 http.put(format!("{base}/v1/network/backhauls/cloudflare"))
-                    .header(SESSION_HEADER, session()?)
+                    .header(SESSION_HEADER, auth()?)
                     .json(&CloudflareCredsRequest {
                         api_token: args[1].clone(),
                         account_id: args[2].clone(),
@@ -423,7 +570,7 @@ async fn control_plane(args: &[String]) -> Result<()> {
             }
             let r: BackhaulStatus = unwrap_cp(
                 http.put(format!("{base}/v1/network/backhauls/tailscale"))
-                    .header(SESSION_HEADER, session()?)
+                    .header(SESSION_HEADER, auth()?)
                     .json(&TailscaleCredsRequest {
                         api_token: args[1].clone(),
                     })
@@ -436,7 +583,7 @@ async fn control_plane(args: &[String]) -> Result<()> {
         "enrollment-key" => {
             let r: NewEnrollmentKey = unwrap_cp(
                 http.post(format!("{base}/v1/enrollment-keys"))
-                    .header(SESSION_HEADER, session()?)
+                    .header(SESSION_HEADER, auth()?)
                     .send()
                     .await?,
             )
@@ -447,7 +594,7 @@ async fn control_plane(args: &[String]) -> Result<()> {
         "nodes" => {
             let r: Vec<NodeView> = unwrap_cp(
                 http.get(format!("{base}/v1/nodes"))
-                    .header(SESSION_HEADER, session()?)
+                    .header(SESSION_HEADER, auth()?)
                     .send()
                     .await?,
             )
@@ -472,7 +619,7 @@ async fn control_plane(args: &[String]) -> Result<()> {
             }
             let _: serde_json::Value = unwrap_cp(
                 http.delete(format!("{base}/v1/nodes/{}", args[1]))
-                    .header(SESSION_HEADER, session()?)
+                    .header(SESSION_HEADER, auth()?)
                     .send()
                     .await?,
             )

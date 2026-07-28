@@ -142,7 +142,13 @@ impl CpClient {
             .send()
             .await
             .context("could not reach the control plane")?;
-        Ok(Self::parse(resp, "enrollment").await?)
+        // The credential being refused here is the enrollment key, not a node token, and the
+        // generic message names the wrong one at the exact moment somebody is looking at a key
+        // they just pasted.
+        Self::parse(resp, "enrollment").await.map_err(|e| match e {
+            CpError::Unauthorized => anyhow!("the enrollment key is unknown or expired"),
+            other => other.into(),
+        })
     }
 
     pub async fn roster(&self) -> std::result::Result<Roster, CpError> {
@@ -182,6 +188,26 @@ impl CpClient {
             .await
             .map_err(|e| CpError::Other(anyhow!("could not reach the control plane: {e}")))?;
         Self::parse(resp, "roster fetch").await
+    }
+
+    /// Remove this node's registration, freeing its address.
+    ///
+    /// Called on the way out of an uninstall. A node that simply disappears leaves a roster
+    /// entry and an allocated address behind forever, since nothing else knows it is gone.
+    pub async fn deregister(&self) -> std::result::Result<(), CpError> {
+        let token = self
+            .node_token
+            .as_ref()
+            .ok_or_else(|| CpError::Other(anyhow!("no node token; nothing to deregister")))?;
+        let resp = self
+            .http
+            .delete(format!("{}/v1/nodes/me", self.base))
+            .header(NODE_TOKEN_HEADER, token)
+            .send()
+            .await
+            .map_err(|e| CpError::Other(anyhow!("could not reach the control plane: {e}")))?;
+        let _: serde_json::Value = Self::parse(resp, "deregistration").await?;
+        Ok(())
     }
 
     /// Ask for a fresh Tailscale auth key.

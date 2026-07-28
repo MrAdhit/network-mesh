@@ -9,10 +9,13 @@ cd "$(dirname "$0")"
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 say "the network, from the control plane"
-SESSION=$(docker exec -e MESH_CP_URL=http://meshcp:8080 meshcp /opt/mesh/meshctl \
-            login "${MESH_EMAIL:-dev@example.com}" "${MESH_PASSWORD:-devpassword}" \
-          | grep -o 'MESH_SESSION=.*' | cut -d= -f2)
-cpctl() { docker exec -e MESH_CP_URL=http://meshcp:8080 -e MESH_SESSION="$SESSION" meshcp /opt/mesh/meshctl "$@"; }
+# bootstrap.sh already logged in and meshctl stored the session, so this only needs to point at
+# the same config.
+cpctl() {
+    docker exec -e MESH_CP_URL=http://meshcp:8080 -e MESH_CONFIG=/var/lib/meshcp/cli.json \
+        meshcp /opt/mesh/meshctl "$@"
+}
+cpctl login "${MESH_EMAIL:-dev@example.com}" "${MESH_PASSWORD:-devpassword}" >/dev/null
 cpctl network
 cpctl nodes
 

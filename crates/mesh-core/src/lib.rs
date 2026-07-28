@@ -1,6 +1,7 @@
 //! Core of the multipath mesh client: backhaul enrollment, tunnels, path racing.
 
 pub mod cloudflare;
+pub mod config;
 pub mod cp;
 pub mod cpclient;
 pub mod direct;

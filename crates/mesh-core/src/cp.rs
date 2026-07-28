@@ -95,6 +95,11 @@ pub struct LoginRequest {
 pub struct SessionResponse {
     pub session_token: String,
     pub account_id: String,
+    /// Unix seconds. Lets the CLI report an expired session as expired rather than passing on
+    /// the 401 it would otherwise get on the next command. Defaulted so a newer CLI still works
+    /// against a control plane that predates the field.
+    #[serde(default)]
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

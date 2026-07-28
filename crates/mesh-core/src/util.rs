@@ -1,5 +1,22 @@
 //! Small shared helpers.
 
+/// The commit these binaries were built from, stamped in by the build script.
+pub const GIT_SHA: &str = env!("MESH_GIT_SHA");
+
+/// One line identifying a build, for `--version` and for bug reports.
+///
+/// The version is a claim and the commit is the thing itself, so both are printed. The target
+/// triple is here because half the platform-specific failures in this project look identical
+/// until you know which build is running.
+pub fn version_line(binary: &str) -> String {
+    format!(
+        "{binary} {} ({}) {}",
+        env!("CARGO_PKG_VERSION"),
+        GIT_SHA,
+        crate::update::TARGET
+    )
+}
+
 /// Seconds since the unix epoch.
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()

@@ -13,3 +13,6 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots", "http2", "charset"] }
+# Reads a password without echoing it. Passing one as an argument puts it in shell history
+# and in `ps` output, so the prompt is the default path and the argument is the fallback.
+rpassword = "7"

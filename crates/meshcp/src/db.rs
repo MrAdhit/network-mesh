@@ -181,13 +181,15 @@ impl Db {
             .optional()?)
     }
 
-    pub fn create_session(&self, account_id: &str, ttl_secs: i64) -> Result<String> {
+    /// Returns the token and when it stops working, so the caller can tell the CLI both.
+    pub fn create_session(&self, account_id: &str, ttl_secs: i64) -> Result<(String, i64)> {
         let tok = crate::crypto::token("sess_");
+        let expires = now_unix() + ttl_secs;
         self.lock().execute(
             "INSERT INTO sessions (token, account_id, expires_at) VALUES (?1, ?2, ?3)",
-            params![tok, account_id, now_unix() + ttl_secs],
+            params![tok, account_id, expires],
         )?;
-        Ok(tok)
+        Ok((tok, expires))
     }
 
     pub fn account_for_session(&self, token: &str) -> Result<Option<Account>> {

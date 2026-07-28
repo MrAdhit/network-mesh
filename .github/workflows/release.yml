@@ -1,0 +1,149 @@
+# Cut a release from a tag.
+#
+# Builds through the same reusable workflow CI uses, then turns its artifacts into things a
+# person can install: per-target archives, deb and rpm packages, and a checksum file.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build, without the leading v.
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      # Kept for the life of a release rather than the 30 days a CI run gets.
+      retention_days: 90
+
+  package:
+    name: archives and packages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Work out the version
+        id: v
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            v="${{ inputs.version }}"
+          else
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "building $v"
+          # The tag and the workspace version disagreeing is the kind of thing nobody notices
+          # until a binary reports one number and the release page another.
+          manifest=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$manifest" != "$v" ]; then
+            echo "::warning::Cargo.toml says $manifest but this release is $v"
+          fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: staged
+
+      - name: Build the archives
+        run: |
+          set -eu
+          v="${{ steps.v.outputs.version }}"
+          mkdir -p out
+          for d in staged/mesh-* staged/meshcp-*; do
+            [ -d "$d" ] || continue
+            name=$(basename "$d")
+            target="${name#mesh-}"
+            target="${target#cp-}"
+            case "$name" in
+              meshcp-*) target="${name#meshcp-}"; stem="meshcp-$v-$target" ;;
+              *)        stem="mesh-$v-$target" ;;
+            esac
+            chmod +x "$d"/* || true
+            case "$target" in
+              # Windows users get a zip, because that is what unpacks with a double click.
+              *windows*) (cd "$d" && zip -qr - .) > "out/$stem.zip" ;;
+              *)         tar -czf "out/$stem.tar.gz" -C "$d" . ;;
+            esac
+          done
+          ls -la out
+
+      # nfpm because the binaries come from a cross-compiled matrix rather than from cargo on
+      # this runner, and one config emitting both formats beats two that can disagree.
+      - name: Install nfpm
+        run: |
+          curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.43.0/nfpm_2.43.0_amd64.deb -o /tmp/nfpm.deb
+          sudo dpkg -i /tmp/nfpm.deb
+
+      - name: Build deb and rpm
+        run: |
+          set -eu
+          export VERSION="${{ steps.v.outputs.version }}"
+          build() { # <nfpm config> <stage dir> <deb arch>
+            export STAGE="$2" ARCH="$3"
+            for format in deb rpm; do
+              nfpm pkg -f "$1" -p "$format" -t out/
+            done
+          }
+          # nfpm names the Debian architectures; the triples are what the matrix produced.
+          for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            case "$triple" in
+              x86_64-*)  arch=amd64 ;;
+              aarch64-*) arch=arm64 ;;
+            esac
+            if [ -d "staged/mesh-$triple" ]; then
+              chmod +x staged/mesh-$triple/*
+              build packaging/nfpm/mesh.yaml "staged/mesh-$triple" "$arch"
+            fi
+            if [ -d "staged/meshcp-$triple" ]; then
+              chmod +x staged/meshcp-$triple/*
+              build packaging/nfpm/meshcp.yaml "staged/meshcp-$triple" "$arch"
+            fi
+          done
+          ls -la out
+
+      - name: Checksums
+        run: |
+          cd out
+          # One file covering everything, so a download can be verified without asking the
+          # release page which hash belonged to which artifact.
+          sha256sum ./* > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          # A release nobody wrote notes for should still say what it is.
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ```
+            curl -fsSL https://mesh.mradhit.net/install.sh | sudo sh
+            ```
+
+            Add `-s -- --key <enrollment-key>` to join a network in the same step. The script
+            fetches from the control plane and verifies each binary against the hash it
+            publishes, so it installs exactly the build that control plane expects its nodes to
+            be running.
+
+            To remove it again, including the node's registration:
+
+            ```
+            curl -fsSL https://mesh.mradhit.net/uninstall.sh | sudo sh
+            ```
+
+            Debian and RPM packages are attached, as are archives for every target. `apt remove`
+            keeps `/var/lib/mesh` and this node's place in its network; `apt purge` gives the
+            address back.

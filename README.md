@@ -32,9 +32,11 @@ crates/mesh-core     the library: enrollment, tunnels, probing, path selection
   proto.rs             the frame format that rides every backhaul, identically
   node.rs              peer table, prober, EWMA path stats, winner selection
   ipc.rs               newline-delimited JSON over a unix socket
+  config.rs            the operator's stored session, and which control plane it belongs to
 crates/meshcp        the control plane: accounts, subnets, roster, backhaul credentials
 crates/meshd         the daemon
 crates/meshctl       the CLI, for both the local node and the network
+packaging/           install.sh and uninstall.sh, service units, deb and rpm definitions
 docs/                what we learned about both vendors' auth, and how we learned it
 ```
 
@@ -55,7 +57,54 @@ Both checksums cover per-packet fields, so neither can be faked.
 **Degraded is not dead.** If one backhaul fails to come up, `meshd` logs it and runs on the
 other. That is the entire premise of the project, so it would be strange to abort.
 
-## Running it
+## Installing it
+
+On a machine that is joining someone's mesh, one line:
+
+```bash
+curl -fsSL https://mesh.mradhit.net/install.sh | sudo sh
+```
+
+That detects the platform, fetches `meshd` and `meshctl` from the control plane, checks each
+against the SHA-256 that control plane publishes, installs a systemd unit or a launchd job, and
+starts the daemon. Add `-s -- --key mkey_...` to join a network in the same step; without one the
+daemon comes up idle and waits, and `meshctl join <enrollment-key>` finishes it whenever you have
+a key.
+
+The installer comes from the control plane rather than a release page on purpose. It is already
+the thing that holds the build a network expects its nodes to be running, and it already serves
+those binaries hashed and unauthenticated for self-updates, so the install path and the update
+path fetch the same bytes from the same place. It also cannot point at the wrong control plane:
+whichever host you fetched the script from is the one written into it.
+
+Debian and RPM packages are attached to each release, as are archives for every target.
+
+Nothing needs to be exported. `meshctl login` stores its session under your home directory,
+`meshctl join` hands the enrollment key straight to the running daemon, and both are read back
+without any variables set. `MESH_SESSION` and `MESH_ENROLLMENT_KEY` still work and still win,
+because scripts and CI want them to.
+
+### Removing it
+
+```bash
+curl -fsSL https://mesh.mradhit.net/uninstall.sh | sudo sh
+```
+
+Deregistering happens first, because a node whose files are gone still holds a roster entry and
+an allocated address, and the credential that proves it may remove itself is one of the things
+about to be deleted. Then the service, the binaries, `/var/lib/mesh`, `/etc/mesh`, and the stored
+session of whoever ran it. Sessions belonging to other users on the machine are listed rather
+than deleted, since those are theirs.
+
+If this machine is also a control plane, `/var/lib/meshcp` is kept unless you pass `--purge`.
+Removing the software from a server is not the same statement as destroying the network it runs,
+and nothing else holds a copy of the accounts or the sealed backhaul credentials.
+
+The packages route their removal hooks through the same script. Debian semantics apply, and the
+difference matters: `apt remove` keeps the state and this node's registration, so reinstalling
+comes back as the same node at the same address, while `apt purge` gives the address back.
+
+## Running it from source
 
 Put your two vendor API tokens in `.env.secrets` (gitignored):
 
@@ -90,8 +139,9 @@ docker exec mesh-a ping 10.201.0.3         # ordinary ICMP, over the mesh interf
 docker exec mesh-a nc 10.201.0.3 9000      # ordinary TCP, over the mesh interface
 ```
 
-`meshctl` also manages the network: `network`, `nodes`, `enrollment-key`, `set-subnet`,
-`set-cloudflare`, `set-tailscale`, `remove-node`.
+`meshctl` also manages the network: `login`, `logout`, `whoami`, `network`, `nodes`,
+`enrollment-key`, `set-subnet`, `set-cloudflare`, `set-tailscale`, `remove-node`. And the local
+node: `join`, `leave`, `update`, `version`.
 
 `ping` probes every path separately and prints a per-path summary plus the winner. `send` uses
 whichever path is winning at that moment.
@@ -256,6 +306,20 @@ Still unverified: `meshcp` runs only on Linux by design.
 registration and its P-256 private key, the Tailscale machine and node keys, and the control
 socket. It is plaintext. This is an MVP and the threat model is currently "none"; it is one
 directory so that it is easy to fix later.
+
+The operator's session is not in there. That directory belongs to root because the daemon needs
+it to, and a session token belongs to a person, so `meshctl login` writes
+`~/.config/mesh/config.json` at mode 0600 (`~/Library/Application Support/mesh` on macOS,
+`%APPDATA%\mesh` on Windows, `MESH_CONFIG` anywhere). The control plane URL is stored in the same
+record as the token rather than as a separate setting, and the token is only ever sent to that
+URL. Keeping them apart is how an account credential eventually reaches whatever host
+`MESH_CP_URL` happened to name.
+
+An enrollment key never lands on disk on the normal path: `meshctl join` hands it to the running
+daemon over the control socket. An installer doing an unattended setup can stage one at
+`$MESH_STATE_DIR/enrollment-key` instead, and the daemon deletes it the moment it works. That
+deletion is the point. A key left lying there would let a node an operator removed re-enroll
+itself on the next reboot, which would make `remove-node` mean nothing.
 
 ## Status
 

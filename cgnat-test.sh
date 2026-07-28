@@ -34,12 +34,13 @@ docker exec cgnat-router sh -c "
 say "starting the control plane account"
 until curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; do sleep 1; done
 source .env.secrets
-OUT=$(docker exec -e MESH_CP_URL=http://meshcp:8080 meshcp /opt/mesh/meshctl \
-        signup dev@example.com devpassword 10.201.0.0/16 2>&1) || \
-OUT=$(docker exec -e MESH_CP_URL=http://meshcp:8080 meshcp /opt/mesh/meshctl \
-        login dev@example.com devpassword)
-SESSION=$(echo "$OUT" | grep -o 'MESH_SESSION=.*' | cut -d= -f2)
-cpctl() { docker exec -e MESH_CP_URL=http://meshcp:8080 -e MESH_SESSION="$SESSION" meshcp /opt/mesh/meshctl "$@"; }
+cpctl() {
+    docker exec -e MESH_CP_URL=http://meshcp:8080 -e MESH_CONFIG=/var/lib/meshcp/cli.json \
+        meshcp /opt/mesh/meshctl "$@"
+}
+# meshctl stores the session itself; MESH_CONFIG keeps it in the control plane's volume.
+cpctl signup dev@example.com devpassword 10.201.0.0/16 >/dev/null 2>&1 || \
+    cpctl login dev@example.com devpassword >/dev/null
 cpctl set-cloudflare "$CF_API_TOKEN" "$CF_ACCOUNT_ID" >/dev/null
 cpctl set-tailscale "$TS_API_TOKEN" >/dev/null
 KEY=$(cpctl enrollment-key | head -1)

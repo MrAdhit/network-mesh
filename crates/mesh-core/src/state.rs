@@ -146,6 +146,49 @@ impl Bootstrap {
             enrollment_key: get("MESH_ENROLLMENT_KEY"),
         }
     }
+
+    /// The environment, then a key an installer left in the state directory.
+    ///
+    /// The file exists for unattended installs, where there is no shell to export a variable in
+    /// and no operator to run `meshctl join`. It is read once and deleted on a successful join;
+    /// see [`consume_enrollment_key`].
+    pub fn load(state_dir: &Path) -> Self {
+        let mut boot = Self::from_env();
+        if boot.enrollment_key.is_none() {
+            boot.enrollment_key = read_enrollment_key(state_dir);
+        }
+        boot
+    }
+}
+
+/// Where an installer may leave an enrollment key for a node that has no operator watching.
+pub fn enrollment_key_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("enrollment-key")
+}
+
+pub fn read_enrollment_key(state_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(enrollment_key_path(state_dir))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Remove the staged key once it has been used.
+///
+/// Deliberate, and the reason the file is not simply read on every start: a key left on disk
+/// would let a node that an operator removed re-enroll itself the next time it restarted, which
+/// would make `remove-node` mean nothing. Rejoining should take a fresh, deliberate act.
+pub fn consume_enrollment_key(state_dir: &Path) {
+    let path = enrollment_key_path(state_dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            tracing::info!(path = %path.display(), "used and removed the staged enrollment key")
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "could not remove the staged enrollment key")
+        }
+    }
 }
 
 /// Where a node should look for its control plane, and why.

@@ -5,6 +5,7 @@
 
 mod crypto;
 mod db;
+mod installer;
 mod provision;
 mod updates;
 
@@ -90,7 +91,7 @@ async fn signup(State(app): Ctx, Json(req): Json<SignupRequest>) -> Reply<Sessio
         .db
         .create_account(req.email.trim(), &hash, &subnet)
         .map_err(bad)?;
-    let session = app
+    let (session, expires_at) = app
         .db
         .create_session(&account.id, SESSION_TTL_SECS)
         .map_err(internal)?;
@@ -98,6 +99,7 @@ async fn signup(State(app): Ctx, Json(req): Json<SignupRequest>) -> Reply<Sessio
     Ok(Json(SessionResponse {
         session_token: session,
         account_id: account.id,
+        expires_at,
     }))
 }
 
@@ -112,13 +114,14 @@ async fn login(State(app): Ctx, Json(req): Json<LoginRequest>) -> Reply<SessionR
             "no account with that email, or the password is wrong",
         ));
     }
-    let session = app
+    let (session, expires_at) = app
         .db
         .create_session(&account.id, SESSION_TTL_SECS)
         .map_err(internal)?;
     Ok(Json(SessionResponse {
         session_token: session,
         account_id: account.id,
+        expires_at,
     }))
 }
 
@@ -249,25 +252,36 @@ async fn remove_node(
     Path(node_id): Path<String>,
 ) -> Reply<serde_json::Value> {
     let account = account_from_session(&app, &headers)?;
+    forget_node(&app, &account.id, &node_id).await
+}
+
+/// A node removing itself, authenticated by its own node token.
+///
+/// Separate from `remove_node` because the credentials differ, and the difference is the point:
+/// uninstalling happens on the machine, which holds a node token and not an account session.
+/// Without this a wiped machine would leave a roster entry holding an address forever.
+///
+/// A node can only ever remove itself, so there is nothing to authorise beyond recognising the
+/// token.
+async fn remove_self(State(app): Ctx, headers: HeaderMap) -> Reply<serde_json::Value> {
+    let me = node_from_token(&app, &headers)?;
+    tracing::info!(node = %me.id, name = %me.name, "node is deregistering itself");
+    forget_node(&app, &me.account_id, &me.id).await
+}
+
+async fn forget_node(app: &App, account_id: &str, node_id: &str) -> Reply<serde_json::Value> {
     // Read the device before the row goes, since afterwards there is nothing left to ask.
-    let device = app
-        .db
-        .cf_device_of(&account.id, &node_id)
-        .map_err(internal)?;
-    let removed = app
-        .db
-        .delete_node(&account.id, &node_id)
-        .map_err(internal)?;
+    let device = app.db.cf_device_of(account_id, node_id).map_err(internal)?;
+    let removed = app.db.delete_node(account_id, node_id).map_err(internal)?;
     if !removed {
         return Err(bad("no such node"));
     }
-
     // Best effort, and deliberately after the removal has already succeeded. The node is gone
     // from the mesh either way; a Cloudflare API that is slow or unhappy should not turn a
     // successful removal into an error the operator has to retry.
     let mut device_removed = false;
     if let Some(device) = device
-        && let Ok(Some((sealed, _))) = app.db.get_cred(&account.id, CRED_CLOUDFLARE)
+        && let Ok(Some((sealed, _))) = app.db.get_cred(account_id, CRED_CLOUDFLARE)
         && let Ok(json) = app.sealer.open(&sealed)
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&json)
     {
@@ -508,12 +522,17 @@ async fn main() -> Result<()> {
         .route("/v1/enrollment-keys", post(mint_enrollment_key))
         .route("/v1/nodes", get(list_nodes))
         .route("/v1/nodes/{node_id}", delete(remove_node))
+        // Node facing, and above the parameterised route so `me` is not read as an id.
+        .route("/v1/nodes/me", delete(remove_self))
         .route("/v1/enroll", post(enroll))
         .route("/v1/roster", get(roster))
         .route("/v1/nodes/me/tailscale-auth-key", post(tailscale_auth_key))
         // Unauthenticated on purpose; see the module comment.
         .route("/v1/updates/{target}", get(updates::manifest))
         .route("/v1/updates/{target}/{name}", get(updates::download))
+        // The one-liner install, pointed at whichever host the user reached us on.
+        .route("/install.sh", get(installer::install))
+        .route("/uninstall.sh", get(installer::uninstall))
         .with_state(app);
 
     // Two responders on different ports. A node compares what each reports: same port from both

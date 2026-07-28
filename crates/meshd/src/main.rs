@@ -12,8 +12,8 @@ use mesh_core::ipc::{
 };
 use mesh_core::node::MeshNode;
 use mesh_core::state::{
-    Bootstrap, COMPILED_CP_URL, CloudflareState, ControlPlaneState, NodeState, default_state_dir,
-    resolve_cp_url,
+    Bootstrap, COMPILED_CP_URL, CloudflareState, ControlPlaneState, NodeState,
+    consume_enrollment_key, default_state_dir, resolve_cp_url,
 };
 use mesh_core::tailscale::TailscaleBackhaul;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -61,8 +61,112 @@ async fn enroll(
     Ok(())
 }
 
+/// What the request handlers need beyond the node itself.
+///
+/// Only `leave` uses it, but it is the whole reason the daemon rather than the CLI does that:
+/// deregistering takes the node token, which lives here and nowhere a person can reach.
+struct Daemon {
+    cp: Arc<CpClient>,
+    state_dir: std::path::PathBuf,
+    node_id: String,
+    shutdown: tokio::sync::watch::Sender<bool>,
+}
+
+/// Answer `meshctl` until somebody hands us an enrollment key.
+///
+/// A daemon started by the service manager at boot has no operator present to put a key in its
+/// environment, so exiting because it has not joined a network yet would mean every install
+/// needs a shell. Idling here instead makes `meshctl join` the way in, and keeps the same
+/// endpoint responsive so `meshctl status` can say what is wrong rather than "is it running?".
+async fn await_enrollment(
+    state: &mut NodeState,
+    state_dir: &Path,
+    cp_url: &str,
+    identity: &NodeIdentity,
+    node_name: &str,
+    started: Instant,
+) -> Result<()> {
+    let endpoint = default_endpoint();
+    let mut listener = Listener::bind(&endpoint).await?;
+    tracing::warn!(
+        endpoint,
+        "not enrolled yet; waiting for `meshctl join <enrollment-key>`"
+    );
+
+    loop {
+        let stream = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "accepting a meshctl connection failed");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+        let (r, mut w) = tokio::io::split(stream);
+        let mut reader = BufReader::new(r);
+        let mut line = String::new();
+        if reader.read_line(&mut line).await.is_err() || line.trim().is_empty() {
+            continue;
+        }
+
+        let mut joined = false;
+        let resp = match serde_json::from_str::<Request>(line.trim()) {
+            Ok(Request::Join { key }) => {
+                match enroll(state, state_dir, cp_url, identity, node_name, &key).await {
+                    Ok(()) => {
+                        let cp = state.control_plane.as_ref().expect("just enrolled");
+                        joined = true;
+                        Response::Joined {
+                            node_id: cp.node_id.clone(),
+                            virtual_ip: cp.virtual_ip.clone(),
+                            subnet: cp.subnet.clone(),
+                        }
+                    }
+                    Err(e) => Response::Error(format!("{e:#}")),
+                }
+            }
+            Ok(Request::Status) => Response::Status(StatusReport {
+                node_name: node_name.to_string(),
+                enrolled: false,
+                virtual_ip: "-".into(),
+                subnet: "-".into(),
+                cloudflare: None,
+                tailscale: None,
+                peer_count: 0,
+                uptime_secs: started.elapsed().as_secs(),
+            }),
+            Ok(_) => Response::Error(
+                "this node has not joined a network yet; run `meshctl join <enrollment-key>`"
+                    .into(),
+            ),
+            Err(e) => Response::Error(format!("bad request: {e}")),
+        };
+
+        let mut out = serde_json::to_string(&resp)
+            .unwrap_or_else(|e| format!("{{\"Error\":\"could not serialise: {e}\"}}"));
+        out.push('\n');
+        let _ = w.write_all(out.as_bytes()).await;
+        let _ = w.flush().await;
+        // Answered first, so the operator sees the outcome rather than a closed socket. The
+        // listener is dropped on the way out and `serve` rebinds the same endpoint.
+        if joined {
+            return Ok(());
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Before the logger, because `--version` should print one line and nothing else. It is
+    // usually the first thing asked for in a bug report.
+    if std::env::args()
+        .skip(1)
+        .any(|a| matches!(a.as_str(), "--version" | "-V" | "version"))
+    {
+        println!("{}", mesh_core::util::version_line("meshd"));
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("MESH_LOG")
@@ -77,9 +181,10 @@ async fn main() -> Result<()> {
     let node_name = std::env::var("MESH_NODE_NAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "mesh-node".to_string());
-    let boot = Bootstrap::from_env();
+    let boot = Bootstrap::load(&state_dir);
     let mut state = NodeState::load(&state_dir)?;
     state.node_name = node_name.clone();
+    let started = Instant::now();
 
     tracing::info!(node = %node_name, state = %state_dir.display(), "meshd starting");
 
@@ -100,10 +205,19 @@ async fn main() -> Result<()> {
     tracing::info!(url = %cp_url, source = %cp_url_source, "control plane");
 
     if state.control_plane.is_none() {
-        let key = boot.enrollment_key.clone().ok_or_else(|| {
-            anyhow!("this node has not enrolled yet; set MESH_ENROLLMENT_KEY to join a network")
-        })?;
-        enroll(&mut state, &state_dir, &cp_url, &identity, &node_name, &key).await?;
+        match boot.enrollment_key.clone() {
+            Some(key) => {
+                enroll(&mut state, &state_dir, &cp_url, &identity, &node_name, &key).await?;
+                consume_enrollment_key(&state_dir);
+            }
+            // No key anywhere, so wait for one rather than exiting. See `await_enrollment`.
+            None => {
+                await_enrollment(
+                    &mut state, &state_dir, &cp_url, &identity, &node_name, started,
+                )
+                .await?
+            }
+        }
     }
 
     let mut cp_state = state.control_plane.clone().expect("just enrolled");
@@ -118,18 +232,30 @@ async fn main() -> Result<()> {
             // Our registration is gone, most likely revoked. Rejoining is only legitimate
             // because it takes a currently-valid enrollment key, which is exactly the
             // credential an operator rotates when they mean the eviction to stick. Without one
-            // this is fatal, and says so.
-            let key = boot.enrollment_key.clone().ok_or_else(|| {
-                anyhow!(
-                    "the control plane no longer recognises this node; it was probably removed. Set MESH_ENROLLMENT_KEY to rejoin, or delete {} to start clean",
-                    state_dir.display()
-                )
-            })?;
-            tracing::warn!(
-                old_node_id = %cp_state.node_id,
-                "our registration was revoked; rejoining with the enrollment key"
-            );
-            enroll(&mut state, &state_dir, &cp_url, &identity, &node_name, &key).await?;
+            // we wait for somebody to supply it rather than exiting or carrying on.
+            match boot.enrollment_key.clone() {
+                Some(key) => {
+                    tracing::warn!(
+                        old_node_id = %cp_state.node_id,
+                        "our registration was revoked; rejoining with the enrollment key"
+                    );
+                    enroll(&mut state, &state_dir, &cp_url, &identity, &node_name, &key).await?;
+                    consume_enrollment_key(&state_dir);
+                }
+                None => {
+                    tracing::warn!(
+                        old_node_id = %cp_state.node_id,
+                        "the control plane no longer recognises this node; it was probably removed"
+                    );
+                    // Same reasoning as a first start with no key: idle and stay answerable
+                    // rather than exit, so `meshctl join` can fix it without a shell trick.
+                    state.control_plane = None;
+                    await_enrollment(
+                        &mut state, &state_dir, &cp_url, &identity, &node_name, started,
+                    )
+                    .await?;
+                }
+            }
             cp_state = state.control_plane.clone().expect("just re-enrolled");
             cp = Arc::new(CpClient::new(&cp_url)?.with_token(cp_state.node_token.clone()));
             (cp.roster().await?, true)
@@ -482,7 +608,30 @@ async fn main() -> Result<()> {
     state.direct_port_poisoned = false;
     state.save(&state_dir)?;
 
-    serve(node, Instant::now(), roster.subnet.clone(), shutdown_rx).await
+    let daemon = Arc::new(Daemon {
+        cp: cp.clone(),
+        state_dir: state_dir.clone(),
+        node_id: cp_state.node_id.clone(),
+        shutdown: shutdown_tx.clone(),
+    });
+    serve(node, started, roster.subnet.clone(), daemon, shutdown_rx).await
+}
+
+/// Everything this machine holds that identifies it as a member.
+///
+/// Removed on `leave` so a restart cannot quietly rejoin from cached state, and so an uninstall
+/// that stops at the binaries still leaves nothing behind. The identity key goes too: a node
+/// that left and later joins again is a new node, and reusing the key would hand it back its old
+/// record.
+fn wipe_membership(state_dir: &Path) {
+    for name in ["state.json", "node-identity.key", "enrollment-key"] {
+        let path = state_dir.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::info!(path = %path.display(), "removed"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(path = %path.display(), error = %e, "could not remove"),
+        }
+    }
 }
 
 async fn bring_up_cloudflare(
@@ -615,6 +764,7 @@ async fn serve(
     node: Arc<MeshNode>,
     started: Instant,
     subnet: String,
+    daemon: Arc<Daemon>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let endpoint = default_endpoint();
@@ -666,6 +816,7 @@ async fn serve(
         };
         let node = node.clone();
         let subnet = subnet.clone();
+        let daemon = daemon.clone();
         tokio::spawn(async move {
             let (r, mut w) = tokio::io::split(stream);
             let mut reader = BufReader::new(r);
@@ -673,25 +824,40 @@ async fn serve(
             if reader.read_line(&mut line).await.is_err() || line.trim().is_empty() {
                 return;
             }
-            let resp = match serde_json::from_str::<Request>(line.trim()) {
-                Ok(req) => handle(&node, started, &subnet, req).await,
-                Err(e) => Response::Error(format!("bad request: {e}")),
+            let (resp, stop) = match serde_json::from_str::<Request>(line.trim()) {
+                Ok(req) => handle(&node, started, &subnet, &daemon, req).await,
+                Err(e) => (Response::Error(format!("bad request: {e}")), false),
             };
             let mut out = serde_json::to_string(&resp)
                 .unwrap_or_else(|e| format!("{{\"Error\":\"could not serialise: {e}\"}}"));
             out.push('\n');
             let _ = w.write_all(out.as_bytes()).await;
             let _ = w.flush().await;
+            // Only once the answer is on the wire. Signalling first would race the accept loop's
+            // return against this write, and losing that race means `meshctl leave` reports a
+            // closed socket for something that actually worked.
+            if stop {
+                let _ = daemon.shutdown.send(true);
+            }
         });
     }
 }
 
-async fn handle(node: &Arc<MeshNode>, started: Instant, subnet: &str, req: Request) -> Response {
+/// Answer one request. The flag says whether the daemon should stop once the answer is sent.
+async fn handle(
+    node: &Arc<MeshNode>,
+    started: Instant,
+    subnet: &str,
+    daemon: &Arc<Daemon>,
+    req: Request,
+) -> (Response, bool) {
+    let plain = |r: Response| (r, false);
     match req {
         Request::Status => {
             let paths = node.available_paths();
-            Response::Status(StatusReport {
+            plain(Response::Status(StatusReport {
                 node_name: node.name.clone(),
+                enrolled: true,
                 virtual_ip: node
                     .virtual_ip
                     .map(|i| i.to_string())
@@ -721,9 +887,9 @@ async fn handle(node: &Arc<MeshNode>, started: Instant, subnet: &str, req: Reque
                 }),
                 peer_count: node.peers().await.len(),
                 uptime_secs: started.elapsed().as_secs(),
-            })
+            }))
         }
-        Request::Peers => Response::Peers(
+        Request::Peers => plain(Response::Peers(
             node.peers()
                 .await
                 .into_iter()
@@ -748,16 +914,16 @@ async fn handle(node: &Arc<MeshNode>, started: Instant, subnet: &str, req: Reque
                         .collect(),
                 })
                 .collect(),
-        ),
+        )),
         Request::Ping { peer, count } => {
             let key = match resolve_one(node, &peer).await {
                 Ok(k) => k,
-                Err(e) => return Response::Error(e),
+                Err(e) => return plain(Response::Error(e)),
             };
             let samples = node
                 .ping(&key, count.clamp(1, 100), Duration::from_secs(5))
                 .await;
-            Response::Ping(
+            plain(Response::Ping(
                 samples
                     .into_iter()
                     .map(|(path, seq, rtt)| PingSample {
@@ -766,22 +932,55 @@ async fn handle(node: &Arc<MeshNode>, started: Instant, subnet: &str, req: Reque
                         rtt_ms: rtt.map(|d| d.as_secs_f64() * 1000.0),
                     })
                     .collect(),
-            )
+            ))
         }
         Request::Send { peer, data } => {
             let bytes = data.into_bytes();
             let n = bytes.len();
             let key = match resolve_one(node, &peer).await {
                 Ok(k) => k,
-                Err(e) => return Response::Error(e),
+                Err(e) => return plain(Response::Error(e)),
             };
-            match node.send_data(&key, bytes).await {
+            plain(match node.send_data(&key, bytes).await {
                 Ok(path) => Response::Sent {
                     path: path.to_string(),
                     bytes: n,
                 },
                 Err(e) => Response::Error(e.to_string()),
-            }
+            })
+        }
+        // Reaching here means we are already a member: an unenrolled daemon answers `join` in
+        // `await_enrollment` and never gets this far.
+        Request::Join { .. } => plain(Response::Error(format!(
+            "this node is already a member as {}; run `meshctl leave` first",
+            daemon.node_id
+        ))),
+        Request::Leave => {
+            // Deregister before anything is destroyed, because the node token is what proves we
+            // may, and it is one of the things about to be deleted.
+            let detail = match daemon.cp.deregister().await {
+                Ok(()) => String::new(),
+                // Already gone, most likely removed by an operator. The local half still needs
+                // clearing, and reporting this as a failure would be wrong: the end state the
+                // caller asked for is exactly what they have.
+                Err(e) if e.is_unauthorized() => {
+                    "the control plane had already forgotten this node".into()
+                }
+                Err(e) => format!(
+                    "could not reach the control plane ({e}); its record survives. Remove it \
+                     with `meshctl remove-node {}`",
+                    daemon.node_id
+                ),
+            };
+            wipe_membership(&daemon.state_dir);
+            tracing::info!(node = %daemon.node_id, "left the network; shutting down");
+            (
+                Response::Left {
+                    node_id: daemon.node_id.clone(),
+                    detail,
+                },
+                true,
+            )
         }
     }
 }
