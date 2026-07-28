@@ -105,9 +105,12 @@ if [ -d "$STATE_DIR" ]; then
     rm -rf "$STATE_DIR"
     gone "$STATE_DIR"
 fi
-for f in /etc/mesh/meshd.env; do
-    [ -e "$f" ] && rm -f "$f" && gone "$f"
-done
+if [ -e /etc/mesh/meshd.env ]; then
+    rm -f /etc/mesh/meshd.env
+    gone /etc/mesh/meshd.env
+fi
+# Only if we emptied it. An operator who put something else of their own in there gets to keep
+# the directory.
 rmdir /etc/mesh 2>/dev/null || true
 # The CLI's throttle marker for update checks. Worthless, but it is ours.
 rm -f "${TMPDIR:-/tmp}/mesh-update-check" /tmp/mesh-update-check 2>/dev/null || true
