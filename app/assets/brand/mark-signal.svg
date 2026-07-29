@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 180" width="130" height="180" role="img" aria-labelledby="t">
+  <title id="t">Mesh (signal)</title>
+
+  <!--
+    The Mesh mark on its own in `signal` green, no plate, transparent background.
+    `mark-mono.svg` is the default; reach for this one where the context is already
+    about live state and a green triad reads as the subject rather than as a claim.
+
+    Same geometry as `mark-mono.svg`, bar for bar — `_AppMark` from
+    lib/src/kit/rail.dart at ten times the rail's numbers: bars 30 wide, gaps 20,
+    heights 180/108, bottom-aligned, caps rounded at rx = half a bar. viewBox is the
+    exact bounding box at 13:18, matching the icon's 357.02784 x 494.34624.
+
+    Colour mirrors `FilamentTokens.dark()` in lib/src/theme/tokens.dart:
+
+      signal #46C98C   all three bars
+
+    In the light theme `signal` is #1F9E68; use that over a pale background, where
+    the dark theme's green goes weak. No bloom here — see `mark-mono.svg` for why.
+  -->
+
+  <rect x="0" y="72" width="30" height="108" rx="15" fill="#46C98C"/>
+  <rect x="100" y="72" width="30" height="108" rx="15" fill="#46C98C"/>
+  <rect x="50" y="0" width="30" height="180" rx="15" fill="#46C98C"/>
+</svg>

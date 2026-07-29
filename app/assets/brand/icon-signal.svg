@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="t">
+  <title id="t">Mesh (signal)</title>
+
+  <!--
+    The green variant of the Mesh app icon. `icon-mono.svg` is what ships; this one
+    is kept because it is worth being able to look at, and because a green triad is
+    the right mark in a context that is already about live state — a status page, a
+    talk slide about the path triad. It is not the app icon.
+
+    Everything except the mark's colour is `icon-mono.svg`, comments and all: same
+    Big Sur plate (824-in-1024, 22.5% radius, SVG rounded rect approximating Apple's
+    continuous corner), same gradient, same edge light, same geometry. Colours mirror
+    `FilamentTokens.dark()` in lib/src/theme/tokens.dart.
+
+      bg          #0B0E11   plate base
+      surfaceHigh #171C23   plate top, at 60% (Color.lerp) -> #12161C
+      signal      #46C98C   all three bars, the bloom, and the haze
+      edgeLight   white 6%  the inner top edge
+      hazeOpacity 4%        x2.5 here — green behind green is absorbed by the mark,
+                            so this variant carries twice what the mono one can
+      bloom       25%       x0.8 wide, x1.2 tight
+
+    Render it with `MESH_ICON_VARIANT=signal flutter test tool/render_app_icon.dart`
+    if you ever need it as PNGs. Keep it in lockstep with icon-mono.svg.
+  -->
+
+  <defs>
+    <linearGradient id="plate" x1="0" y1="100.0448" x2="0" y2="923.9552" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#12161C"/>
+      <stop offset="0.72" stop-color="#0B0E11"/>
+    </linearGradient>
+
+    <radialGradient id="haze" cx="512" cy="495.521792" r="494.34624" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#46C98C" stop-opacity="0.1"/>
+      <stop offset="0.45" stop-color="#46C98C" stop-opacity="0.044"/>
+      <stop offset="1" stop-color="#46C98C" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="edge" x1="0" y1="100.0448" x2="0" y2="923.9552" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="0.35" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+
+    <filter id="bloom-wide" x="-600%" y="-200%" width="1300%" height="500%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="123.58656"/>
+    </filter>
+    <filter id="bloom-tight" x="-600%" y="-200%" width="1300%" height="500%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="41.19552"/>
+    </filter>
+
+    <clipPath id="plate-clip">
+      <rect x="100.0448" y="100.0448" width="823.9104" height="823.9104" rx="185.37984" ry="185.37984"/>
+    </clipPath>
+  </defs>
+
+  <rect x="100.0448" y="100.0448" width="823.9104" height="823.9104" rx="185.37984" ry="185.37984" fill="url(#plate)"/>
+
+  <g clip-path="url(#plate-clip)">
+    <rect x="100.0448" y="100.0448" width="823.9104" height="823.9104" fill="url(#haze)"/>
+
+    <rect x="470.80448" y="248.348672" width="82.39104" height="494.34624" rx="41.19552" fill="#46C98C" opacity="0.2" filter="url(#bloom-wide)"/>
+    <rect x="470.80448" y="248.348672" width="82.39104" height="494.34624" rx="41.19552" fill="#46C98C" opacity="0.3" filter="url(#bloom-tight)"/>
+
+    <rect x="333.48608" y="446.087168" width="82.39104" height="296.607744" rx="41.19552" fill="#46C98C"/>
+    <rect x="608.12288" y="446.087168" width="82.39104" height="296.607744" rx="41.19552" fill="#46C98C"/>
+    <rect x="470.80448" y="248.348672" width="82.39104" height="494.34624" rx="41.19552" fill="#46C98C"/>
+  </g>
+
+  <rect x="102.3488" y="102.3488" width="819.3024" height="819.3024" rx="183.07584" ry="183.07584" fill="none" stroke="url(#edge)" stroke-width="4.608"/>
+</svg>

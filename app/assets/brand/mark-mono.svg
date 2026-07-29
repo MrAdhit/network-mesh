@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 180" width="130" height="180" role="img" aria-labelledby="t">
+  <title id="t">Mesh</title>
+
+  <!--
+    The Mesh mark on its own, no plate, transparent background — for docs, the web,
+    a slide. `icon-mono.svg` is the app icon; this is the same triad without the
+    thing it sits on.
+
+    Geometry is `_AppMark` from lib/src/kit/rail.dart, at ten times the rail's own
+    numbers so the box is whole units: bars 30 wide (rail: 3), gaps 20 (rail: 2),
+    heights 180/108 — the 100/60 relationship — bottom-aligned, caps fully rounded
+    at rx = half a bar. The viewBox is the mark's exact bounding box, 13:18, which is
+    the same ratio the icon uses at 357.02784 x 494.34624. Scale factor between the
+    two is 2.746368; nothing else differs.
+
+    Colours mirror `FilamentTokens.dark()` in lib/src/theme/tokens.dart:
+
+      textFaint #5C6B7A   the two flanking bars
+      text      #E6EBF0   the tall middle bar
+
+    Deliberately no bloom here, unlike the icon and the rail. A bloom is a property
+    of the mark sitting on a dark plate; over a background this file cannot know, it
+    either vanishes or smears a grey cloud across it. If you are placing this on
+    Filament `bg` and want the glow, use the icon, or add the blur yourself with the
+    numbers from `icon-mono.svg`.
+
+    On a light background use the mark as-is: `text` and `textFaint` are the dark
+    theme's ink, and they hold. If you need the light theme's, they are #1A222B and
+    #93A0AC.
+  -->
+
+  <rect x="0" y="72" width="30" height="108" rx="15" fill="#5C6B7A"/>
+  <rect x="100" y="72" width="30" height="108" rx="15" fill="#5C6B7A"/>
+  <rect x="50" y="0" width="30" height="180" rx="15" fill="#E6EBF0"/>
+</svg>

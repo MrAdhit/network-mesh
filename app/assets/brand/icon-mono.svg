@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="t">
+  <title id="t">Mesh</title>
+
+  <!--
+    The Mesh app icon. This file is the canonical art; `tool/render_app_icon.dart`
+    is the pipeline that compiles it into the macOS appiconset, and the two are
+    expected to agree pixel for pixel at 1024. The renderer is not generated from
+    this file and must not be: it hand-lays 16 and 32, where one vector scaled
+    down gives you a smear instead of a silhouette.
+
+    Colours mirror `FilamentTokens.dark()` in lib/src/theme/tokens.dart — they are
+    written out here because an SVG cannot import Dart, not because the icon has a
+    palette of its own. If a token moves, both files move.
+
+      bg          #0B0E11   plate base
+      surfaceHigh #171C23   plate top, at 60% (Color.lerp) -> #12161C
+      textFaint   #5C6B7A   the two flanking bars
+      text        #E6EBF0   the tall middle bar, and its bloom
+      signal      #46C98C   the haze, and nothing else
+      edgeLight   white 6%  the inner top edge
+      hazeOpacity 4%        x1.25 here; see below
+      bloom       25%       x0.8 wide, x1.2 tight
+
+    The mark is `_AppMark` from lib/src/kit/rail.dart: three bottom-aligned pills,
+    equal widths, heights 60/100/60, gaps two thirds of a bar, bloom on the tall
+    one. Grey/white/grey rather than green on purpose — green is what the app says
+    once it has measured something, and an icon has measured nothing. The one green
+    left is the haze, at half the strength the signal variant uses (5% rather than
+    10%): behind a near-white bar there is nothing to absorb it, so at full strength
+    it stops reading as depth and starts reading as a colour cast.
+
+    Plate geometry is Apple's Big Sur icon grid: an 824pt plate centred in a 1024pt
+    canvas (9.77% inset) with a corner radius of 22.5% of the plate = 185.3798.
+    Apple's corner is a continuous superellipse; `rect/@rx` below is a circular-corner
+    approximation, which is what SVG offers and is accepted here. The Dart renderer
+    draws the true superellipse via `Canvas.drawRSuperellipse`, so at the corners the
+    two differ by a hair — everywhere else they are the same drawing.
+  -->
+
+  <defs>
+    <!-- Lit from above: the same instruction `panelFill` gives a panel, longer and quieter. -->
+    <linearGradient id="plate" x1="0" y1="100.0448" x2="0" y2="923.9552" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#12161C"/>
+      <stop offset="0.72" stop-color="#0B0E11"/>
+    </linearGradient>
+
+    <!-- The window's phosphor haze, centred on the mark. -->
+    <radialGradient id="haze" cx="512" cy="495.521792" r="494.34624" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#46C98C" stop-opacity="0.05"/>
+      <stop offset="0.45" stop-color="#46C98C" stop-opacity="0.022"/>
+      <stop offset="1" stop-color="#46C98C" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- A reflection is the colour of the light, not of the thing. -->
+    <linearGradient id="edge" x1="0" y1="100.0448" x2="0" y2="923.9552" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="0.35" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+
+    <!--
+      stdDeviation is the sigma the renderer hands MaskFilter.blur: barWidth x 1.5
+      and x 0.5. color-interpolation-filters must be sRGB — the SVG default of
+      linearRGB would blur in a different space than Skia does and come out hotter.
+    -->
+    <filter id="bloom-wide" x="-600%" y="-200%" width="1300%" height="500%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="123.58656"/>
+    </filter>
+    <filter id="bloom-tight" x="-600%" y="-200%" width="1300%" height="500%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="41.19552"/>
+    </filter>
+
+    <!-- A blur that leaks past the corner is the one thing that gives the plate away. -->
+    <clipPath id="plate-clip">
+      <rect x="100.0448" y="100.0448" width="823.9104" height="823.9104" rx="185.37984" ry="185.37984"/>
+    </clipPath>
+  </defs>
+
+  <rect x="100.0448" y="100.0448" width="823.9104" height="823.9104" rx="185.37984" ry="185.37984" fill="url(#plate)"/>
+
+  <g clip-path="url(#plate-clip)">
+    <rect x="100.0448" y="100.0448" width="823.9104" height="823.9104" fill="url(#haze)"/>
+
+    <!-- The tall bar's bloom: wide for the glow in the air, tight for the heat at the bar. -->
+    <rect x="470.80448" y="248.348672" width="82.39104" height="494.34624" rx="41.19552" fill="#E6EBF0" opacity="0.2" filter="url(#bloom-wide)"/>
+    <rect x="470.80448" y="248.348672" width="82.39104" height="494.34624" rx="41.19552" fill="#E6EBF0" opacity="0.3" filter="url(#bloom-tight)"/>
+
+    <!-- Flanks, then the tall one, in the mark's own order. -->
+    <rect x="333.48608" y="446.087168" width="82.39104" height="296.607744" rx="41.19552" fill="#5C6B7A"/>
+    <rect x="608.12288" y="446.087168" width="82.39104" height="296.607744" rx="41.19552" fill="#5C6B7A"/>
+    <rect x="470.80448" y="248.348672" width="82.39104" height="494.34624" rx="41.19552" fill="#E6EBF0"/>
+  </g>
+
+  <rect x="102.3488" y="102.3488" width="819.3024" height="819.3024" rx="183.07584" ry="183.07584" fill="none" stroke="url(#edge)" stroke-width="4.608"/>
+</svg>
