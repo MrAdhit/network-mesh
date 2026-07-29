@@ -130,7 +130,11 @@ done
 say "installed into $PREFIX/bin"
 
 mkdir -p "$STATE_DIR"
-chmod 0700 "$STATE_DIR"
+# 0755 rather than 0700: the daemon's IPC socket lives in here and is deliberately open to every
+# local user, which needs traversal on the directory holding it or the mode on the socket is
+# moot. Files inside carry their own modes; this bit is only the path to the socket. systemd's
+# StateDirectory= creates it 0755 already, so this matches what a packaged install gets.
+chmod 0755 "$STATE_DIR"
 
 # The key is staged rather than passed on a command line: meshd reads it on first start and
 # deletes it, so a node an operator later removes cannot quietly re-enrol itself on reboot.

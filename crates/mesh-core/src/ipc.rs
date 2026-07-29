@@ -6,6 +6,16 @@
 //!
 //! Both are local-only and unauthenticated, which is the same trust model either way: anyone
 //! who can open the endpoint can drive the daemon.
+//!
+//! The unix socket is therefore world-connectable on purpose: it is chmodded 0666 right after
+//! bind. The daemon runs as root and its state directory is root-owned, so a socket left at
+//! whatever the umask produced would only ever answer root, and root is not who the clients
+//! are. The desktop app runs as the logged-in user and `meshctl` should not need `sudo` to ask
+//! the daemon a question. Restricting the socket would not have bought anything either, since
+//! local-only and unauthenticated was already the stated model above; it only decided which
+//! local user got to use it.
+//!
+//! Windows keeps the default pipe ACLs, unchanged.
 
 use serde::{Deserialize, Serialize};
 
@@ -162,12 +172,21 @@ mod transport {
             // A stale socket from a crashed daemon would otherwise make bind fail forever.
             let _ = std::fs::remove_file(endpoint);
             if let Some(dir) = std::path::Path::new(endpoint).parent() {
-                std::fs::create_dir_all(dir)?;
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
             }
-            Ok(Self {
-                inner: tokio::net::UnixListener::bind(endpoint)
-                    .with_context(|| format!("binding {endpoint}"))?,
-            })
+            let inner = tokio::net::UnixListener::bind(endpoint)
+                .with_context(|| format!("binding {endpoint}"))?;
+
+            // Bind applies the umask, and under a root daemon that yields a socket only root
+            // can open. See the module comment: local clients are the point, so widen it.
+            // A socket nobody can reach is not a working daemon, so this failing fails the
+            // bind rather than leaving something that looks up and answers no one.
+            if let Err(e) = set_world_rw(endpoint) {
+                let _ = std::fs::remove_file(endpoint);
+                return Err(e);
+            }
+            Ok(Self { inner })
         }
 
         pub async fn accept(&mut self) -> Result<Connection> {
@@ -176,9 +195,38 @@ mod transport {
         }
     }
 
+    /// Let every local user open the socket.
+    fn set_world_rw(endpoint: &str) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o666))
+            .with_context(|| format!("opening {endpoint} up to local clients"))
+    }
+
     pub async fn connect(endpoint: &str) -> Result<Connection> {
         let stream = tokio::net::UnixStream::connect(endpoint).await?;
         Ok(Box::new(stream))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        /// The socket has to come out reachable regardless of the umask the daemon inherited.
+        #[tokio::test]
+        async fn socket_is_world_connectable() {
+            let dir = std::env::temp_dir().join(format!("mesh-ipc-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let endpoint = dir.join("meshd.sock");
+            let endpoint = endpoint.to_string_lossy().into_owned();
+
+            let listener = Listener::bind(&endpoint).await.expect("bind");
+            let mode = std::fs::metadata(&endpoint).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o777, 0o666, "socket mode was {:o}", mode & 0o777);
+
+            drop(listener);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
 
