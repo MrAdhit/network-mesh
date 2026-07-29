@@ -1,0 +1,26 @@
+name: mesh_app
+description: "Desktop app for the mesh daemon"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # The only dependency beyond Flutter itself. dart:io covers the daemon's unix
+  # socket; http covers the control plane's JSON API.
+  http: ^1.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  # Filament draws its own icons as CustomPainter paths and imports no Material
+  # widgets, so the Material icon font would be dead weight in the bundle.
+  uses-material-design: false

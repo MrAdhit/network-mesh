@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The app sandbox is off on purpose.
+
+  This app is a control panel for a system daemon: it opens meshd's unix socket
+  at /var/lib/mesh/meshd.sock and it shares meshctl's session file in
+  ~/Library/Application Support/mesh/. A sandboxed process may do neither — a
+  connect() to a socket outside the container fails with EPERM before the
+  socket's own mode is ever consulted. No entitlement buys back an arbitrary
+  unix socket, so the sandbox is off and this is not a Mac App Store build.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>
