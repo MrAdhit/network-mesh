@@ -69,6 +69,31 @@ class AppState extends ChangeNotifier {
   bool _booted = false;
   bool get booted => _booted;
 
+  // -- the one derived decision: wizard or dashboard ----------------------
+  //
+  // Three facts, folded here because they are read together and nowhere else.
+  // The app wears exactly one of its two faces, and which one is not a route
+  // the user picks: it is what is true about this Mac.
+
+  /// This Mac is on the mesh right now: the socket answers and it is enrolled.
+  bool get onTheMesh => daemon.reachable && daemon.enrolled;
+
+  /// First run has finished at least once. See [UiPrefs.setupComplete].
+  bool get setupComplete => prefs.setupComplete.value;
+
+  /// True once boot has looked at everything the decision turns on: the
+  /// preferences file, the socket, and the disk.
+  ///
+  /// Without this the window would show a stage for the two frames before the
+  /// first poll lands and then replace it — first run is not something to
+  /// flash at somebody who is already set up.
+  bool get bootSettled =>
+      prefs.loaded && daemon.firstPollComplete && manager.inspected;
+
+  /// Remember that this Mac is set up. Idempotent; the arrival stage calls it
+  /// once and the router calls it on any boot that finds [onTheMesh] true.
+  void markSetupComplete() => prefs.setSetupComplete(true);
+
   /// Read the preferences and the shared session, then start polling.
   ///
   /// Ordered: prefs first so the window does not repaint from the default
@@ -124,6 +149,11 @@ class AppState extends ChangeNotifier {
       return report.up ? MeshPathState.up : MeshPathState.down;
     }
 
+    // Null is what makes the rail leave the chip out altogether, so this is
+    // the line that decides who ever sees one. A session, or a session that
+    // has run out — never "signed out", which is not news about anything.
+    // An expired one stays: somebody signed in on this Mac once, and a login
+    // that quietly stopped working is worth a caution-coloured word.
     final expired = session.sessionExpired;
     final email = session.hasSession
         ? (session.email ?? session.accountId ?? 'Signed in')

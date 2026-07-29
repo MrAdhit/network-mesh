@@ -1,15 +1,22 @@
-/// Getting a control plane session.
+/// Getting a session for the account that owns a network.
 ///
 /// The sign-in and sign-up forms live here rather than inside `network.dart`
 /// because they are not really part of that screen: they are what stands in
-/// front of it until there is a session, and the same panel is the whole of the
-/// first-run path. [MeshAuthPanel] drops into any column of panels.
+/// front of it until there is a session. [MeshAuthPanel] drops into any column
+/// of panels, and the Network screen's quiet card reveals one.
+///
+/// First run does not use this. The setup flow asks the same two questions in
+/// its own shape — one card among two ways onto a network, chained straight
+/// into joining — and this panel is what Network shows afterwards, to somebody
+/// who is already on the mesh and now wants to run it.
+///
+/// Nothing here says which control plane any of it talks to. That is Settings
+/// vocabulary, and this is a primary surface.
 library;
 
 import 'package:flutter/widgets.dart';
 
-import '../data/cli_config.dart';
-import '../kit/badge.dart';
+import '../data/cli_config.dart' show SessionProblem;
 import '../kit/button.dart';
 import '../kit/panel.dart';
 import '../kit/text_field.dart';
@@ -35,6 +42,11 @@ enum MeshAuthMode {
       this == MeshAuthMode.login ? 'Sign in' : 'Create account';
   String get title =>
       this == MeshAuthMode.login ? 'Sign in' : 'Create an account';
+
+  /// The headline over whatever the control plane said when it said no.
+  String get failure => this == MeshAuthMode.login
+      ? "Couldn't sign in"
+      : "Couldn't create your account";
 
   /// The label on the button that swaps to the other one.
   String get swapLabel =>
@@ -159,36 +171,22 @@ class _MeshAuthPanelState extends State<MeshAuthPanel> {
         ? null
         : session.session.message;
 
-    final error = _localError ?? session.authError?.message;
+    // Ours about our own form, or the control plane's about the attempt. The
+    // two are different shapes because they are different registers: a typo in
+    // the email box is not news from a wire.
+    final wire = session.authError?.message;
 
     return MeshPanel(
       title: _mode.title,
       subtitle: signup
-          ? 'A new account, its own subnet, and a session on this machine'
-          : 'The control plane owns the subnet, the backhauls and the keys',
+          ? 'A new account, and a network of your own'
+          : 'The account that owns your network',
       actions: [
         MeshButton.ghost(
           label: _mode.swapLabel,
           onPressed: busy ? null : _swap,
         ),
       ],
-      // Which control plane this is about to talk to belongs to the panel, not
-      // to the form: it sits along the bottom edge and gives the card a base.
-      footer: Row(
-        children: [
-          Text('Control plane', style: theme.type.label),
-          const SizedBox(width: FilamentSpace.x3),
-          Flexible(
-            child: Text(
-              session.cpUrl.url,
-              style: theme.type.mono,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          const SizedBox(width: FilamentSpace.x2),
-          MeshBadge(session.cpUrl.source.label),
-        ],
-      ),
       child: Padding(
         // This is the one panel that is the whole screen, so it stands taller
         // than a panel that shares the column with five others.
@@ -234,21 +232,20 @@ class _MeshAuthPanelState extends State<MeshAuthPanel> {
                   const SizedBox(height: FilamentSpace.x4),
                   MeshTextField(
                     controller: _subnet,
-                    label: 'Subnet',
+                    label: 'Addresses',
                     placeholder: '10.201.0.0/16',
-                    helper: 'Optional; the control plane picks 10.201.0.0/16',
+                    helper: 'Optional. Left empty, you get 10.201.0.0/16.',
                     mono: true,
                     enabled: !busy,
                     onSubmitted: (_) => _submit(session),
                   ),
                 ],
-                if (error != null) ...[
+                if (_localError != null) ...[
                   const SizedBox(height: FilamentSpace.x4),
-                  MeshErrorNote(error),
-                ],
-                if (session.configError != null) ...[
+                  MeshErrorNote(_localError!),
+                ] else if (wire != null) ...[
                   const SizedBox(height: FilamentSpace.x4),
-                  MeshErrorNote(session.configError!),
+                  MeshWireError(headline: _mode.failure, detail: wire),
                 ],
                 const SizedBox(height: FilamentSpace.x5),
                 // The one primary action on the screen, and the width of the

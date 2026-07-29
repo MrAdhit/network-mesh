@@ -145,6 +145,18 @@ class FilamentTypography {
     color: tokens.text,
   );
 
+  /// 20/600 in `text`. The title of a full-window stage, and nothing else.
+  ///
+  /// One step above [section], on the same scale the mono face uses for its
+  /// heroes: a whole window with one sentence in it needs a title that carries
+  /// the room, and 15px in the middle of 720px of space reads as a caption.
+  TextStyle get stage => TextStyle(
+    fontSize: 20,
+    height: 1.25,
+    fontWeight: FontWeight.w600,
+    color: tokens.text,
+  );
+
   // ---- Data face ----
 
   /// 11 mono in `textDim`.

@@ -9,6 +9,7 @@ library;
 import 'package:flutter/widgets.dart';
 
 import '../theme/theme.dart';
+import 'panel.dart';
 
 /// One fact on a quiet tile.
 ///
@@ -45,10 +46,11 @@ class MeshStatTile extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         // Quieter than a panel on purpose: tiles sit inside the page, not on
-        // top of it, so they get the fill and a whisper of a border — no
-        // shadow, no top edge, nothing that would make them float.
+        // top of it, so they get the fill and a whisper of a ring — no shadow,
+        // no inner top edge, nothing that would make them float. The ring is
+        // the panel's, at 0.6: same light, less of it.
         color: tokens.surfaceHigh.withValues(alpha: tokens.isDark ? 0.5 : 0.7),
-        border: Border.all(color: tokens.hairline.withValues(alpha: 0.6)),
+        border: MeshRingBorder(tokens, opacity: 0.6),
         borderRadius: BorderRadius.circular(FilamentRadius.control),
       ),
       child: Padding(

@@ -1,5 +1,12 @@
-/// Settings — where things are, who we are, and the one button that undoes
-/// enrollment.
+/// Settings — the mechanics, all of them, filed.
+///
+/// This is the one screen that speaks the operator's language, and since the
+/// dashboard stopped showing socket paths, resolved URLs, target triples,
+/// hashes and where a value came from, it is the only place any of them exist.
+/// It is also where meshd is installed, started, stopped, restarted and
+/// updated: the first run does it once from the setup flow and the banner over
+/// the shell offers the one-click restart, but every deliberate act on the
+/// daemon happens here.
 ///
 /// Everything above the danger zone is either a fact about this machine or a
 /// two-value preference. The facts are read-only on purpose: the socket path
@@ -91,7 +98,7 @@ class _Body extends StatelessWidget {
     final theme = FilamentTheme.of(context);
     return MeshScreen(
       title: 'Settings',
-      subtitle: 'Endpoints, session, appearance',
+      subtitle: 'Endpoints, the binary, the session, appearance',
       children: [
         _daemonPanel(context, theme),
         _controlPlanePanel(context, theme),
@@ -180,9 +187,20 @@ class _Body extends StatelessWidget {
                         MeshdInstall.binary,
                         style: theme.type.monoEmphasis,
                       )
-                    : Text(
-                        'Not installed. Install it from the Overview screen.',
-                        style: theme.type.small,
+                    // Where it would go, and the fact that nothing is there.
+                    // The Install button is in the row below with the rest of
+                    // the lifecycle; this is not the place for an action.
+                    : Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Not installed', style: theme.type.bodyDim),
+                          const SizedBox(height: FilamentSpace.x1 + 1),
+                          MeshCopyable(
+                            MeshdInstall.binary,
+                            style: theme.type.monoSmall,
+                          ),
+                        ],
                       ),
               ),
               if (manager.installed)
@@ -260,8 +278,10 @@ class _Body extends StatelessWidget {
   /// The lifecycle buttons, and what the app can say about them.
   ///
   /// Each one is enabled or explains itself; there is no third state where a
-  /// button is dead and silent. Only "Update" is primary, and only while there
-  /// is one — the rest are maintenance, not the thing to do next.
+  /// button is dead and silent. At most one is primary, and it is whichever is
+  /// the thing to do next: Install while there is no binary, Update while the
+  /// control plane holds a newer one, nothing otherwise — start and stop are
+  /// maintenance, not a recommendation.
   Widget _managerActions(FilamentTheme theme) {
     if (!manager.supported) return ManagerUnsupportedNote(manager: manager);
 
@@ -274,6 +294,15 @@ class _Body extends StatelessWidget {
 
     String? why(String? reason) => busy ? 'Already working on it' : reason;
 
+    // Install is the one action that fetches before it asks for a password, so
+    // it is also the one that can be blocked by there being nothing to fetch.
+    final install = why(
+      installed
+          ? 'meshd is already installed'
+          : (manager.target == null
+                ? 'The control plane publishes no build for this machine'
+                : null),
+    );
     final start = why(
       notInstalled() ?? (running ? 'The daemon is already running' : null),
     );
@@ -319,6 +348,13 @@ class _Body extends StatelessWidget {
           spacing: FilamentSpace.x2,
           runSpacing: FilamentSpace.x2,
           children: [
+            if (!installed)
+              button(
+                'Install',
+                install,
+                () => manager.install(),
+                variant: MeshButtonVariant.primary,
+              ),
             button('Start', start, () => manager.start()),
             button('Stop', stop, () => manager.stop()),
             button('Restart', restart, () => manager.restart()),
@@ -339,10 +375,11 @@ class _Body extends StatelessWidget {
         ),
         const SizedBox(height: FilamentSpace.x3),
         Text(
-          'Start, stop, restart and update each ask for an administrator '
-          'password once. Checked for updates ${formatAgo(manager.lastChecked)}'
-          '; on its own the app asks at most every '
-          '${formatSpan(updateCheckInterval)}.',
+          'Install, start, stop, restart and update each ask for an '
+          'administrator password once; downloading is unprivileged and '
+          'happens first. Checked for updates '
+          '${formatAgo(manager.lastChecked)}; on its own the app asks at most '
+          'every ${formatSpan(updateCheckInterval)}.',
           style: theme.type.small,
         ),
       ],
@@ -674,6 +711,12 @@ class _Body extends StatelessWidget {
       },
     );
     if (!confirmed || !context.mounted) return;
+    // Leaving is what puts this Mac back at the start, and the routing decision
+    // keys off this one preference, so this is the one place that clears it. A
+    // Mac that left is a Mac that has to be set up again: the window becomes
+    // the setup flow, at its network stage, because the engine is still there
+    // and still running.
+    prefs.setSetupComplete(false);
     final left = daemon.lastLeave;
     MeshToast.show(
       context,

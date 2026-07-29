@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 
 import '../theme/theme.dart';
 import 'button.dart';
+import 'panel.dart';
 import 'text_field.dart';
 
 /// The route a dialog rides on.
@@ -177,11 +178,12 @@ class MeshDialog extends StatelessWidget {
           child: SizedBox(
             width: width,
             child: DecoratedBox(
-              // A panel that happens to be floating: same fill, same edge, and
+              // A panel that happens to be floating: same fill, same ring —
+              // one step brighter, because a dialog is nearer the light — and
               // the shade doubled up because this one really is above the page.
               decoration: BoxDecoration(
                 gradient: tokens.panelFill,
-                border: Border.all(color: tokens.hairlineHigh),
+                border: MeshRingBorder(tokens, base: tokens.hairlineHigh),
                 borderRadius: BorderRadius.circular(FilamentRadius.panel),
                 boxShadow: <BoxShadow>[...tokens.shade, ...tokens.shade],
               ),

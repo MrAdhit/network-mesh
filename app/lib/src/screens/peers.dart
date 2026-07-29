@@ -2,8 +2,12 @@
 ///
 /// The row is the glance: name, address, triad, the winning path's ewma and
 /// the last two minutes of it as a sparkline. Opening a row is the second
-/// look: every path the daemon reports, with its own history, and a ping that
-/// probes all of them and prints what `meshctl ping` prints.
+/// look: every path the engine reports, with its own history, and a ping that
+/// probes all of them and prints what the CLI prints.
+///
+/// A primary surface, so it speaks outcomes: "the mesh engine", never the
+/// program's name and never its socket. The one thing quoted verbatim is what
+/// came off the wire, and it sits under a headline in our own words.
 library;
 
 import 'dart:async';
@@ -39,12 +43,12 @@ class PeersScreen extends StatelessWidget {
         return MeshScreen(
           title: 'Peers',
           subtitle: daemon.reachable && daemon.enrolled
-              ? '${countOf(peers.length, 'peer')} known to the daemon'
-              : 'The peer table and its per-path detail',
+              ? '${countOf(peers.length, 'peer')} on your network'
+              : 'Every machine this Mac can reach, and how',
           actions: [
             MeshAsyncIconButton(
               glyph: MeshGlyph.refresh,
-              tooltip: 'Poll now',
+              tooltip: 'Check now',
               action: daemon.refreshNow,
             ),
           ],
@@ -78,13 +82,16 @@ class _PeerPanel extends StatelessWidget {
       title: 'Peer table',
       subtitle: stale
           ? null
-          : 'Polled every ${formatSpan(daemon.effectiveInterval)}',
-      actions: [if (stale) const MeshBadge('Stale', tone: MeshTone.caution)],
+          : 'Updated every ${formatSpan(daemon.effectiveInterval)}',
+      actions: [if (stale) const MeshBadge('Not live', tone: MeshTone.caution)],
       padding: EdgeInsets.zero,
       footer: stale && daemon.error != null
-          ? Text(daemon.error!.message, style: theme.type.error)
+          ? MeshWireError(
+              headline: 'The mesh engine stopped',
+              detail: daemon.error!.message,
+            )
           : null,
-      // The last good table stays on screen while the daemon is away; the
+      // The last good table stays on screen while the engine is away; the
       // badge and the footer are what say it is no longer current.
       child: Opacity(
         opacity: stale ? 0.55 : 1,
@@ -106,10 +113,8 @@ class _PeerPanel extends StatelessWidget {
   }
 
   static String _emptyLine(DaemonStore daemon) {
-    if (!daemon.reachable) return 'The daemon is not answering';
-    if (!daemon.enrolled) {
-      return 'Not enrolled; join a network on the Overview screen';
-    }
+    if (!daemon.reachable) return 'The mesh engine is stopped';
+    if (!daemon.enrolled) return 'This Mac is not on a network';
     // What the CLI says, in the app's voice.
     return 'No peers known yet.';
   }
@@ -395,7 +400,10 @@ class _PingSection extends StatelessWidget {
         ),
         if (error != null) ...[
           const SizedBox(height: FilamentSpace.x4),
-          Text(error.message, style: theme.type.error),
+          MeshWireError(
+            headline: "Couldn't ping $peerName",
+            detail: error.message,
+          ),
         ],
         if (run != null) ...[
           const SizedBox(height: FilamentSpace.x4),

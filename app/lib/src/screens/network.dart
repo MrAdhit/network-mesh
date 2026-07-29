@@ -1,9 +1,14 @@
-/// Network — everything the control plane owns.
+/// Network — the machines on it, the addresses it hands out, the keys that let
+/// a machine in.
 ///
-/// Requires a control plane session and says so plainly when there is not one:
-/// the sign-in form takes the screen over rather than greying panels out. With
-/// a session it is the account, the subnet and its address budget, the two
-/// backhaul credential forms, enrollment key minting, and the node roster.
+/// Signed out, it is one quiet card offering to sign in: a node-only user never
+/// needs this screen, so it does not open with a form in their face. The form
+/// arrives when they ask for it. Signed in it is the account, the address
+/// budget, the two backhaul credential forms, key minting, and the roster.
+///
+/// A primary surface, so it speaks in the words the person uses: "your
+/// network", never the control plane, and never where a URL came from — that
+/// badge, and the URL under it, live in Settings.
 ///
 /// Nothing here polls. The store fetches when this screen becomes visible and
 /// every 30s while it stays visible; the shell drives that.
@@ -60,14 +65,14 @@ class _Body extends StatelessWidget {
     if (!session.loaded) {
       return MeshScreen(
         title: 'Network',
-        subtitle: 'Control plane management',
+        subtitle: 'Your network',
         children: [
           MeshPanel(
             child: Row(
               children: [
                 const MeshSpinner(size: 13),
                 const SizedBox(width: FilamentSpace.x2),
-                Text('Reading the stored session', style: theme.type.bodyDim),
+                Text('Looking for a sign-in', style: theme.type.bodyDim),
               ],
             ),
           ),
@@ -75,41 +80,22 @@ class _Body extends StatelessWidget {
       );
     }
 
-    if (!session.hasSession) return _signedOut(context, theme);
+    if (!session.hasSession) return _signedOut(context);
     return _signedIn(context, theme);
   }
 
   // -- signed out ---------------------------------------------------------
 
-  Widget _signedOut(BuildContext context, FilamentTheme theme) {
+  /// One card, and the form only if it is asked for.
+  ///
+  /// This Mac is already on the mesh; managing the network it joined is
+  /// somebody's job and not necessarily this person's. Opening with a password
+  /// field would say they are in the wrong state, which they are not.
+  Widget _signedOut(BuildContext context) {
     return MeshScreen(
       title: 'Network',
-      subtitle: 'Control plane management',
-      children: [
-        MeshAuthPanel(onAuthenticated: () => store.refresh()),
-        MeshPanel(
-          title: 'What a session is for',
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'The control plane holds the subnet, the backhaul credentials '
-                'and the enrollment keys. The daemon on this machine only ever '
-                'needs a key, so a node can run perfectly well without anyone '
-                'signing in here.',
-                style: theme.type.bodyDim,
-              ),
-              const SizedBox(height: FilamentSpace.x4),
-              Text(
-                'This is the same session meshctl uses; signing in here signs '
-                'in there.',
-                style: theme.type.small,
-              ),
-            ],
-          ),
-        ),
-      ],
+      subtitle: 'Your network',
+      children: [_SignInReveal(store: store)],
     );
   }
 
@@ -123,7 +109,7 @@ class _Body extends StatelessWidget {
 
     return MeshScreen(
       title: 'Network',
-      subtitle: 'Control plane management',
+      subtitle: 'Your network',
       actions: [
         if (fetched != null)
           Padding(
@@ -143,14 +129,13 @@ class _Body extends StatelessWidget {
       children: [
         if (failure != null)
           MeshPanel(
-            title: 'The control plane did not answer',
             accent: theme.tokens.alarm,
-            child: MeshErrorNote(
-              failure.message,
-              hint: stale
-                  ? 'The session is no longer accepted; sign out on the '
-                        'Settings screen and sign in again'
-                  : null,
+            child: MeshWireError(
+              headline: stale
+                  ? 'Your sign-in is no longer accepted'
+                  : 'Your network did not answer',
+              detail: failure.message,
+              hint: stale ? 'Sign out in Settings and sign in again.' : null,
             ),
           ),
         if (view == null)
@@ -162,9 +147,7 @@ class _Body extends StatelessWidget {
                   const SizedBox(width: FilamentSpace.x2),
                 ],
                 Text(
-                  store.loading
-                      ? 'Asking the control plane'
-                      : 'Nothing fetched yet',
+                  store.loading ? 'Asking your network' : 'Nothing yet',
                   style: theme.type.bodyDim,
                 ),
                 const Spacer(),
@@ -227,16 +210,6 @@ class _Body extends StatelessWidget {
             display: shortId(view.accountId, head: 8, tail: 6),
           ),
         ),
-        MeshFact(
-          label: 'Control plane',
-          child: Row(
-            children: [
-              Flexible(child: MeshCopyable(session.cpUrl.url)),
-              const SizedBox(width: FilamentSpace.x2),
-              MeshBadge(session.cpUrl.source.label),
-            ],
-          ),
-        ),
       ]),
     );
   }
@@ -277,8 +250,8 @@ class _Body extends StatelessWidget {
     ];
 
     return MeshPanel(
-      title: 'Subnet',
-      subtitle: 'The address space the control plane hands out',
+      title: 'Addresses',
+      subtitle: 'The range your network hands out, one address per machine',
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -311,8 +284,8 @@ class _Body extends StatelessWidget {
             )
           else
             Text(
-              'The subnet is fixed once a node is enrolled; the control plane '
-              'refuses to move it out from under an address that is in use.',
+              'The range is fixed once a machine has joined; it cannot move '
+              'out from under an address that is in use.',
               style: theme.type.small,
             ),
         ],
@@ -360,7 +333,7 @@ class _Body extends StatelessWidget {
 
     return MeshPanel(
       title: 'Enrollment keys',
-      subtitle: 'One key enrolls one node',
+      subtitle: 'One key lets one machine join',
       actions: [
         MeshButton.primary(
           label: 'Mint a key',
@@ -375,8 +348,9 @@ class _Body extends StatelessWidget {
         children: [
           if (key == null)
             Text(
-              'A key is shown here once, when it is minted. Hand it to a node '
-              'with `meshctl join <key>`, or paste it on the Overview screen.',
+              'A key is shown here once, when it is minted. Hand it to the '
+              'machine you want on your network; it asks for one while it is '
+              'being set up.',
               style: theme.type.bodyDim,
             )
           else ...[
@@ -413,14 +387,14 @@ class _Body extends StatelessWidget {
               ],
             ),
             const SizedBox(height: FilamentSpace.x3),
-            Text(
-              'This is the only time the control plane shows it.',
-              style: theme.type.small,
-            ),
+            Text('This is the only time it is shown.', style: theme.type.small),
           ],
           if (store.keyError != null) ...[
             const SizedBox(height: FilamentSpace.x3),
-            MeshErrorNote(store.keyError!.message),
+            MeshWireError(
+              headline: "Couldn't mint a key",
+              detail: store.keyError!.message,
+            ),
           ],
         ],
       ),
@@ -460,10 +434,10 @@ class _Body extends StatelessWidget {
     final nodes = store.nodes ?? const <NodeView>[];
 
     return MeshPanel(
-      title: 'Nodes',
+      title: 'Machines',
       actions: [
         if (store.nodes != null)
-          MeshBadge(countOf(nodes.length, 'node'), mono: true),
+          MeshBadge(countOf(nodes.length, 'machine'), mono: true),
       ],
       padding: EdgeInsets.zero,
       child: Column(
@@ -473,14 +447,14 @@ class _Body extends StatelessWidget {
           MeshTable(
             columns: const [
               MeshColumn('State', width: 74),
-              MeshColumn('Virtual IP', width: 116),
+              MeshColumn('Address', width: 116),
               MeshColumn('Name', flex: 3),
               MeshColumn('Last seen', width: 104),
-              MeshColumn('Node ID', flex: 3),
+              MeshColumn('ID', flex: 3),
               MeshColumn('', width: 28),
             ],
             empty: Text(
-              'No nodes enrolled yet; mint a key and start a meshd.',
+              'No machines yet. Mint a key and hand it to one.',
               style: theme.type.bodyDim,
             ),
             rows: [
@@ -514,7 +488,7 @@ class _Body extends StatelessWidget {
                       glyph: MeshGlyph.close,
                       size: 22,
                       tone: MeshTone.alarm,
-                      tooltip: 'Remove this node',
+                      tooltip: 'Remove this machine',
                       busy: store.isRemoving(node.nodeId),
                       onPressed: () => _remove(context, node),
                     ),
@@ -525,16 +499,18 @@ class _Body extends StatelessWidget {
           if (store.nodeError != null)
             Padding(
               padding: const EdgeInsets.all(FilamentSpace.panel),
-              child: MeshErrorNote(store.nodeError!.message),
+              child: MeshWireError(
+                headline: "Couldn't remove that machine",
+                detail: store.nodeError!.message,
+              ),
             ),
         ],
       ),
     );
   }
 
-  /// meshctl prints the last-seen string exactly as the control plane sent it.
-  /// We do the same when it does not parse, and say it in the app's own terms
-  /// when it does.
+  /// The last-seen string exactly as it arrived when it does not parse, and in
+  /// the app's own terms when it does.
   static String _lastSeen(String? raw) {
     if (raw == null || raw.isEmpty) return 'Never';
     final at = DateTime.tryParse(raw);
@@ -547,8 +523,8 @@ class _Body extends StatelessWidget {
       context,
       title: 'Remove $name?',
       message:
-          'The node is deregistered and its address is free for the next '
-          'node. It can rejoin with a new enrollment key.',
+          'It leaves your network and its address is free for the next '
+          'machine. It can come back with a new enrollment key.',
       confirmLabel: 'Remove',
       onConfirm: () async {
         final done = await store.removeNode(node.nodeId);
@@ -561,8 +537,115 @@ class _Body extends StatelessWidget {
     if (!confirmed || !context.mounted) return;
     MeshToast.show(
       context,
-      'Removed; its address is free for the next node',
+      'Removed; its address is free for the next machine',
       tone: MeshTone.signal,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// the quiet card
+// ---------------------------------------------------------------------------
+
+/// "Sign in to manage your network", and the form only once it is asked for.
+///
+/// Progressive disclosure, and the reason for it: this Mac is already on the
+/// mesh. Whoever runs the network signs in; everybody else never needs to, and
+/// a password field they did not ask for tells them they are missing something
+/// when they are not. Choosing to sign in swaps the card for the form on
+/// `drift` — the same travel every other change of content in the app makes —
+/// and the way out is a ghost button, not a dismissal.
+class _SignInReveal extends StatefulWidget {
+  const _SignInReveal({required this.store});
+
+  final NetworkStore store;
+
+  @override
+  State<_SignInReveal> createState() => _SignInRevealState();
+}
+
+class _SignInRevealState extends State<_SignInReveal> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tempo = FilamentMotion.drift(context);
+    return AnimatedSize(
+      duration: tempo.duration,
+      curve: tempo.curve,
+      alignment: Alignment.topCenter,
+      child: AnimatedSwitcher(
+        duration: tempo.duration,
+        switchInCurve: tempo.curve,
+        switchOutCurve: tempo.curve,
+        child: _open ? _form(context) : _card(context),
+      ),
+    );
+  }
+
+  Widget _card(BuildContext context) {
+    final theme = FilamentTheme.of(context);
+    return MeshPanel(
+      key: const ValueKey('signed-out-card'),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: FilamentSpace.x5),
+        child: Align(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 460),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Sign in to manage your network',
+                  style: theme.type.section,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: FilamentSpace.x3),
+                Text(
+                  'Managing it means adding machines, taking them off, and '
+                  'setting up the paths they reach each other on. This Mac '
+                  'stays on the mesh either way.',
+                  style: theme.type.bodyDim,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: FilamentSpace.x6),
+                // A Row, not a Center: a kit button fills any bounded width it
+                // is offered, and a 460px primary action is a banner.
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    MeshButton.primary(
+                      label: 'Sign in',
+                      onPressed: () => setState(() => _open = true),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _form(BuildContext context) {
+    return Column(
+      key: const ValueKey('signed-out-form'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        MeshAuthPanel(onAuthenticated: () => widget.store.refresh()),
+        const SizedBox(height: FilamentSpace.x3),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            MeshButton.ghost(
+              label: 'Not now',
+              onPressed: () => setState(() => _open = false),
+            ),
+          ],
+        ),
+      ],
     );
   }
 }
@@ -602,7 +685,7 @@ class _SubnetFormState extends State<_SubnetForm> {
     if (value.isEmpty || widget.store.savingSubnet) return;
     final ok = await widget.store.setSubnet(value);
     if (!ok || !mounted) return;
-    MeshToast.show(context, 'Subnet is now $value', tone: MeshTone.signal);
+    MeshToast.show(context, 'The range is now $value', tone: MeshTone.signal);
   }
 
   @override
@@ -619,7 +702,7 @@ class _SubnetFormState extends State<_SubnetForm> {
               width: 220,
               child: MeshTextField(
                 controller: _subnet,
-                label: 'Change the subnet',
+                label: 'Change the range',
                 placeholder: '10.201.0.0/16',
                 mono: true,
                 enabled: !store.savingSubnet,
@@ -628,7 +711,7 @@ class _SubnetFormState extends State<_SubnetForm> {
             ),
             const SizedBox(width: FilamentSpace.x3),
             MeshButton(
-              label: 'Set subnet',
+              label: 'Set range',
               busy: store.savingSubnet,
               onPressed: _save,
             ),
@@ -636,12 +719,15 @@ class _SubnetFormState extends State<_SubnetForm> {
         ),
         const SizedBox(height: FilamentSpace.x3),
         Text(
-          'Possible only while no node is enrolled.',
+          'Possible only until the first machine joins.',
           style: FilamentTheme.typeOf(context).small,
         ),
         if (store.subnetError != null) ...[
           const SizedBox(height: FilamentSpace.x3),
-          MeshErrorNote(store.subnetError!.message),
+          MeshWireError(
+            headline: "Couldn't change the range",
+            detail: store.subnetError!.message,
+          ),
         ],
       ],
     );
@@ -730,9 +816,15 @@ class _CloudflareFormState extends State<_CloudflareForm> {
             ),
           ),
         ),
-        if (_localError != null || store.cloudflareError != null) ...[
+        if (_localError != null) ...[
           const SizedBox(height: FilamentSpace.x3),
-          MeshErrorNote(_localError ?? store.cloudflareError!.message),
+          MeshErrorNote(_localError!),
+        ] else if (store.cloudflareError != null) ...[
+          const SizedBox(height: FilamentSpace.x3),
+          MeshWireError(
+            headline: "Couldn't set Cloudflare up",
+            detail: store.cloudflareError!.message,
+          ),
         ],
         const SizedBox(height: FilamentSpace.x5),
         Row(
@@ -811,9 +903,15 @@ class _TailscaleFormState extends State<_TailscaleForm> {
             ),
           ),
         ),
-        if (_localError != null || store.tailscaleError != null) ...[
+        if (_localError != null) ...[
           const SizedBox(height: FilamentSpace.x3),
-          MeshErrorNote(_localError ?? store.tailscaleError!.message),
+          MeshErrorNote(_localError!),
+        ] else if (store.tailscaleError != null) ...[
+          const SizedBox(height: FilamentSpace.x3),
+          MeshWireError(
+            headline: "Couldn't set Tailscale up",
+            detail: store.tailscaleError!.message,
+          ),
         ],
         const SizedBox(height: FilamentSpace.x5),
         Row(

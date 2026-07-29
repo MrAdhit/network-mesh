@@ -1,12 +1,8 @@
-/// The manager's furniture, shared by the two screens that drive it.
-///
-/// Overview is the front door — it is what you see when there is no daemon to
-/// show — and Settings is where the same installation is a set of facts with
-/// buttons under them. Both need the same three things, and neither should own
-/// its own copy: what the app is doing right now and what went wrong last
-/// ([ManagerActivity]), what the binary on disk is ([ManagerBuild],
+/// The manager's furniture: what the app is doing right now and what went
+/// wrong last ([ManagerActivity]), what the binary on disk is ([ManagerBuild],
 /// [ManagerServiceLine]), and what a platform this app cannot manage gets told
-/// instead ([ManagerUnsupportedNote]).
+/// instead ([ManagerUnsupportedNote]). Settings drives all three; the banner
+/// over the shell drives the actions behind them.
 ///
 /// Nothing here polls or acts. These are readings of [ManagerStore]; the
 /// screens own the buttons.

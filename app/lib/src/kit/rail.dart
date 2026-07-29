@@ -59,16 +59,23 @@ class MeshRailStatus {
   /// A short second line: node name when enrolled, the OS error when not.
   final String? detail;
 
-  /// Null when there is no control plane session.
+  /// Null when there is no session, which is a state and not a problem: the
+  /// chip is not rendered at all, rather than rendered saying "signed out".
+  /// Most people who use this app never sign in to anything — a machine that
+  /// joined with a key someone sent them is exactly as set up as any other.
   final String? sessionEmail;
 
   final bool sessionExpired;
 
   /// The word under the triad.
+  ///
+  /// The rail is a primary surface, so this says what is true of the Mac and
+  /// not what is true of a socket: "Enrolled" and "Unreachable" are the log's
+  /// vocabulary and they live in Settings now.
   String get daemonLabel => switch (daemonReachable) {
     null => 'Connecting',
-    false => 'Unreachable',
-    true => enrolled ? 'Enrolled' : 'Not enrolled',
+    false => 'Engine stopped',
+    true => enrolled ? 'On the mesh' : 'Not on a network',
   };
 
   MeshTone get daemonTone => switch (daemonReachable) {
@@ -77,9 +84,12 @@ class MeshRailStatus {
     true => enrolled ? MeshTone.signal : MeshTone.caution,
   };
 
-  String get sessionLabel => sessionEmail == null
-      ? 'Signed out'
-      : (sessionExpired ? 'Session expired' : sessionEmail!);
+  /// What the chip says, or null when there is no chip. There is no third
+  /// state: a Mac nobody signed in on is not in a wrong state and the rail
+  /// says nothing about it at all.
+  String? get sessionLabel => sessionEmail == null
+      ? null
+      : (sessionExpired ? 'Session expired' : sessionEmail);
 
   MeshTone get sessionTone => sessionEmail == null
       ? MeshTone.neutral
@@ -457,7 +467,9 @@ class _StatusBlock extends StatelessWidget {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: FilamentSpace.x4),
         child: MeshTooltip(
-          message: '${s.daemonLabel}\n${s.sessionLabel}',
+          message: s.sessionLabel == null
+              ? s.daemonLabel
+              : '${s.daemonLabel}\n${s.sessionLabel}',
           child: Center(child: triad),
         ),
       );
@@ -506,17 +518,19 @@ class _StatusBlock extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ],
-          const SizedBox(height: FilamentSpace.x4),
-          MeshTooltip(
-            message: s.sessionEmail == null
-                ? 'No control plane session'
-                : s.sessionEmail!,
-            child: MeshBadge(
-              s.sessionLabel,
-              tone: s.sessionTone,
-              mono: s.sessionEmail != null && !s.sessionExpired,
+          // Only when there is one. A rail that reports "signed out" to
+          // somebody who was never asked to sign in is inventing a fault.
+          if (s.sessionLabel != null) ...[
+            const SizedBox(height: FilamentSpace.x4),
+            MeshTooltip(
+              message: s.sessionEmail!,
+              child: MeshBadge(
+                s.sessionLabel!,
+                tone: s.sessionTone,
+                mono: !s.sessionExpired,
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );

@@ -88,7 +88,10 @@ Depth tokens, both themes:
 | `bloom`     | owner color at 25%, blur 10   | owner color at 20%, blur 8   | glow of live dots, winner bars, the hero number |
 
 Panel fill is a vertical gradient from `surfaceHigh`-leaning at the top to `surface` at
-the bottom — quiet enough that you only notice it when it is gone. Sparklines fill the
+the bottom — quiet enough that you only notice it when it is gone. The border is a
+gradient too, not a mono hairline: it catches the light at the top (`edgeLight` blended
+into `hairline`) and falls to plain `hairline` at the sides and a touch darker at the
+bottom — the ring reads as lit from the same place as the fill. Sparklines fill the
 area under the line with `signal` fading to transparent. Glows bloom, they never flare:
 if a screenshot looks like a neon sign, it is overdone.
 
@@ -150,6 +153,18 @@ paths in code — no icon font, no Material glyphs. The set is small on purpose:
 pulse (overview), nodes (peers), globe (network), gear (settings), key, copy, refresh,
 ping/radar, chevron, close, warning, power, eye/eye-off. Icons inherit text color.
 
+The app icon is the rail's triad mark on a Big Sur plate: an 824-in-1024 rounded square at
+22.5% radius, `bg` lifted toward `surfaceHigh` at the top, an `edgeLight` inner top edge,
+a faint `signal` haze behind the bars. The bars wear the mark's own colours — `textFaint`
+flanks, a `text` middle bar blooming near-white — because green is what the app says once
+it has measured something, and an icon has measured nothing. That is the rail's argument,
+applied to the brand: `signal` stays reserved for live state. The haze is the one green
+left, and at 4% it is atmosphere rather than a reading. Canonical art is the hand-written
+SVGs in `assets/brand/` (`icon-mono` ships, `icon-signal` is the green variant, `mark-*`
+are the bare marks for docs); `tool/render_app_icon.dart` compiles the appiconset from the
+same constants, drawing every size rather than scaling one, and 32px and below drop the
+haze, the edge light and the bloom and fatten the bars onto whole pixels.
+
 ## Components (the kit)
 
 All widgets are ours, prefixed `Mesh`, built on the Flutter widgets layer — the app must
@@ -174,8 +189,49 @@ not import Material or Cupertino for anything visible. Core kit:
 - `MeshDialog` — overlay confirm: dimmed backdrop (`bg` at 60%), centered panel, the
   destructive action styled destructive and never default-focused.
 - `MeshToast` — bottom-right transient notices, one at a time.
+- `MeshStage` — first run's full-window layout: the mark, one title, one message or body,
+  one action, and a reserved zone at the bottom for `MeshStepTriad`, the three-bar step
+  indicator (the product's own mark, one bar per stage, igniting on `settle`).
+- `MeshBanner` — the shell-level one-line notice with one action, `surface` fill and a
+  caution accent; `MeshBannerHost` slides it in over the top edge on `drift`.
 - `MeshToggle`, `MeshSelect`, `MeshTooltip`, `MeshCopyable` (click-to-copy with a brief
   "Copied" confirmation in place).
+
+## Experience
+
+The app is an instrument, but the user is not its operator — they are a person who wants
+this Mac on their mesh. Two registers, never mixed:
+
+- **Primary surfaces speak outcomes.** "This Mac is on the mesh." "Three paths to every
+  peer." Never a socket path, a URL, a target triple, an env var, a hash, or a source
+  badge. If a sentence would fit in a log line, it does not belong on a primary surface.
+- **Settings speaks mechanics.** Everything the operator might need — endpoints,
+  resolved URLs and where they came from, binary hashes, the works — lives there,
+  verbatim and unapologetic. Diagnostics are not deleted; they are *filed*.
+- Wire errors stay verbatim, but always under a human headline: what happened in our
+  words, then the daemon's words in mono beneath.
+
+**First run is an onboarding, not a diagnosis.** When the mesh is not set up, the app
+does not present panels about what is missing — it takes the user through a staged,
+full-window flow, one decision per screen, doing every mechanical step itself the moment
+it can:
+
+1. **Welcome.** The mark, the name, one sentence of what the mesh does, one button.
+2. **Engine.** The app is *already downloading* the daemon while the user reads. One
+   button finishes it — labeled with what macOS is about to do ("macOS will ask for your
+   password"). No "meshd is not installed": the screen is about getting running, not
+   about what is absent. When the daemon answers, the step completes itself.
+3. **Network.** One decision: "I have an enrollment key" (paste, join) or "I run this
+   network" (sign in, then joining is a single click — the app mints the key itself).
+4. **Arrival.** The address, a lit triad, a breath — then the dashboard, automatically.
+
+The step indicator is the triad itself: three bars, one per stage, each igniting as its
+stage completes. Onboarding is derived from state and resumable at any step; a Mac that
+is already set up never sees it. A daemon that dies later gets a calm banner on the
+dashboard ("The mesh engine stopped · Restart") — never a takeover, never a path.
+
+The words "meshd", "control plane" and friends are Settings vocabulary. Onboarding and
+the dashboard say "the mesh engine" and "your network".
 
 ## Motion
 

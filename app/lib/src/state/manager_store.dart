@@ -1,8 +1,11 @@
 /// The app as the daemon's manager, not just its window.
 ///
 /// Everything the machine can tell us about meshd without being root — is the
-/// binary there, what does it hash to, is the launchd job loaded — plus the
-/// four actions that need root once each. The socket remains the truth about
+/// binary there, what does it hash to, is the launchd job loaded, and fetching
+/// a build the control plane is offering — plus the four actions that need root
+/// once each. The split matters: [ManagerStore.prepare] is the whole download,
+/// with no prompt behind it, which is what lets first run start it before the
+/// user has decided anything. The socket remains the truth about
 /// whether it is running: a loaded job that is crash-looping is not running,
 /// and only [DaemonStore] knows the difference.
 ///
@@ -131,7 +134,9 @@ class ManagerStore extends ChangeNotifier {
     if (_cpUrl.url == value.url && _cpUrl.source == value.source) return;
     _cpUrl = value;
     // A different control plane is a different set of binaries; what we knew
-    // about the last one says nothing about this one.
+    // about the last one says nothing about this one, and a binary fetched
+    // from the old one is not a head start on the new one.
+    unawaited(_dropPrepared());
     _offered = null;
     _updateAvailable = false;
     _lastChecked = null;
@@ -437,6 +442,38 @@ class ManagerStore extends ChangeNotifier {
 
   // -- the actions ----------------------------------------------------------
 
+  /// Fetch and verify the binary, and keep it. Nothing is installed, nothing is
+  /// started, and nobody is asked for a password.
+  ///
+  /// This is the whole unprivileged half of [install], split out so first run
+  /// can do it while the user is still reading the screen: downloading tens of
+  /// megabytes is the long part, and none of it needs root. What arrives is
+  /// held in [_prepared] and the next [install] or [update] uses it instead of
+  /// fetching the same bytes again — after checking it is still exactly what
+  /// the control plane is offering, because a manifest can move between the two
+  /// halves.
+  ///
+  /// Returns true when there is a verified binary waiting. False, with [error]
+  /// set, when there is not. Does nothing at all when the binary is already
+  /// installed or something else is in flight.
+  Future<bool> prepare() async {
+    if (busy || !_macOs || _installed) return false;
+    _beginFetch();
+    File? staged;
+    try {
+      staged = await _fetch();
+      return staged != null;
+    } catch (e) {
+      _error = _reason(e);
+      return false;
+    } finally {
+      // Kept, not discarded: having it is the entire point.
+      _prepared = staged;
+      _endFetch();
+      notifyListeners();
+    }
+  }
+
   /// Fetch, verify, install, and load the job. One password prompt.
   Future<bool> install() => _fetchThenApply(
     build: (staged) async {
@@ -466,63 +503,22 @@ class ManagerStore extends ChangeNotifier {
   }) async {
     if (busy || !_macOs) return false;
 
-    _error = null;
-    _downloadedBytes = 0;
-    _downloadTotalBytes = null;
-    _lastStagedPlist = null;
-    _sincePaint
-      ..stop()
-      ..reset();
-    _enter(ManagerState.downloading);
+    _beginFetch();
 
     File? staged;
     File? stagedPlist;
+
+    /// Set when the user dismissed the password prompt. Nothing was changed,
+    /// so nothing about the bytes we fetched has stopped being true: the next
+    /// press of the same button starts at the prompt instead of at 0%.
+    bool keep = false;
+
     try {
-      final target = _target ??= await _detectTarget();
-      if (target == null) {
-        _error = 'no meshd build for this Mac';
-        return false;
-      }
-
-      final client = _updateClientFor(_cpUrl.url);
-      final VerifiedBinary verified;
-      try {
-        final manifest = await client.manifest(target);
-        final want = manifest.get(meshdBinaryName);
-        if (want == null) {
-          _error = '${_cpUrl.url} has no $meshdBinaryName build for $target';
-          return false;
-        }
-        _offered = want;
-        _downloadTotalBytes = want.size > 0 ? want.size : null;
-        notifyListeners();
-
-        staged = File(
-          '${_downloads.path}${Platform.pathSeparator}$meshdBinaryName',
-        );
-        verified = await client.download(
-          target: target,
-          want: want,
-          into: staged,
-          onProgress: (received, total) {
-            _downloadedBytes = received;
-            _downloadTotalBytes = total ?? _downloadTotalBytes;
-            // The hash is finalised and compared the moment the last byte
-            // lands, which is exactly what verifying names.
-            final complete = total != null && received >= total;
-            if (complete) _busy = ManagerState.verifying;
-            // The count is kept for every chunk; only the repaint is rationed.
-            // The last one is never rationed — a progress bar that stops at
-            // 97% because the cadence swallowed the final chunk is a lie.
-            if (complete || _paintDue()) notifyListeners();
-          },
-        );
-      } finally {
-        client.close();
-      }
+      staged = await _fetch();
+      if (staged == null) return false;
 
       _enter(ManagerState.verifying);
-      final command = await build(verified.file);
+      final command = await build(staged);
       stagedPlist = _lastStagedPlist;
 
       _enter(ManagerState.awaitingAdmin);
@@ -532,35 +528,148 @@ class ManagerStore extends ChangeNotifier {
       _lastChecked = _now();
       await _touchMarker();
       return true;
-    } on PrivilegedException catch (e) {
-      // A dismissed prompt is a decision, not a fault.
-      if (!e.cancelled) _error = e.message;
-      return false;
-    } on UpdateException catch (e) {
-      _error = e.message;
-      return false;
-    } on InvalidCpUrl catch (e) {
-      _error = e.message;
-      return false;
-    } on FileSystemException catch (e) {
-      _error = '${e.path ?? ''}: ${e.osError?.message ?? e.message}'.trim();
-      return false;
     } catch (e) {
-      _error = '$e';
+      // A dismissed prompt is a decision, not a fault: [_reason] gives it no
+      // sentence, and it is the one failure worth keeping the download for.
+      _error = _reason(e);
+      keep = e is PrivilegedException && e.cancelled;
       return false;
     } finally {
-      // The staged copies are re-fetchable and one of them is an executable;
-      // neither is worth leaving in a user-writable directory.
-      await _discard(staged);
+      if (keep) {
+        _prepared = staged;
+      } else {
+        // The staged copies are re-fetchable and one of them is an executable;
+        // neither is worth leaving in a user-writable directory.
+        _prepared = null;
+        await _discard(staged);
+      }
       await _discard(stagedPlist);
-      _busy = null;
-      _downloadedBytes = 0;
-      _downloadTotalBytes = null;
+      _endFetch();
       await refresh();
       await onApplied?.call();
       notifyListeners();
     }
   }
+
+  /// The half of an install that needs no password: resolve the target, ask
+  /// the control plane what it holds, and end up with a verified binary on
+  /// disk — downloaded now, or fetched earlier by [prepare].
+  ///
+  /// Returns null when it recorded a reason to stop. Throws whatever the wire
+  /// throws; the two callers turn that into [error] the same way.
+  Future<File?> _fetch() async {
+    final target = _target ??= await _detectTarget();
+    if (target == null) {
+      _error = 'no meshd build for this Mac';
+      return null;
+    }
+
+    final client = _updateClientFor(_cpUrl.url);
+    try {
+      final manifest = await client.manifest(target);
+      final want = manifest.get(meshdBinaryName);
+      if (want == null) {
+        _error = '${_cpUrl.url} has no $meshdBinaryName build for $target';
+        return null;
+      }
+      _offered = want;
+      _downloadTotalBytes = want.size > 0 ? want.size : null;
+      notifyListeners();
+
+      final ready = await _takePrepared(want);
+      if (ready != null) {
+        // Already here, already the right bytes. The readout jumps to full
+        // rather than pretending to download something it is holding.
+        _downloadedBytes = want.size;
+        _enter(ManagerState.verifying);
+        return ready;
+      }
+
+      final staged = File(
+        '${_downloads.path}${Platform.pathSeparator}$meshdBinaryName',
+      );
+      final verified = await client.download(
+        target: target,
+        want: want,
+        into: staged,
+        onProgress: (received, total) {
+          _downloadedBytes = received;
+          _downloadTotalBytes = total ?? _downloadTotalBytes;
+          // The hash is finalised and compared the moment the last byte
+          // lands, which is exactly what verifying names.
+          final complete = total != null && received >= total;
+          if (complete) _busy = ManagerState.verifying;
+          // The count is kept for every chunk; only the repaint is rationed.
+          // The last one is never rationed — a progress bar that stops at
+          // 97% because the cadence swallowed the final chunk is a lie.
+          if (complete || _paintDue()) notifyListeners();
+        },
+      );
+      return verified.file;
+    } finally {
+      client.close();
+    }
+  }
+
+  /// What [prepare] left behind, if it is still exactly what is wanted.
+  ///
+  /// Taken, not borrowed: the caller owns the file from here, and a copy that
+  /// no longer matches the manifest is deleted rather than kept around to be
+  /// re-checked on every attempt.
+  Future<File?> _takePrepared(BinaryInfo want) async {
+    final file = _prepared;
+    _prepared = null;
+    if (file == null) return null;
+    try {
+      if (!await file.exists()) return null;
+      if (want.size > 0 && await file.length() != want.size) {
+        await _discard(file);
+        return null;
+      }
+      if (want.sha256.isEmpty) return null;
+      if (await sha256OfFile(file) != want.sha256) {
+        await _discard(file);
+        return null;
+      }
+      return file;
+    } on FileSystemException {
+      return null;
+    }
+  }
+
+  Future<void> _dropPrepared() async {
+    final file = _prepared;
+    _prepared = null;
+    await _discard(file);
+  }
+
+  void _beginFetch() {
+    _error = null;
+    _downloadedBytes = 0;
+    _downloadTotalBytes = null;
+    _lastStagedPlist = null;
+    _sincePaint
+      ..stop()
+      ..reset();
+    _enter(ManagerState.downloading);
+  }
+
+  void _endFetch() {
+    _busy = null;
+    _downloadedBytes = 0;
+    _downloadTotalBytes = null;
+  }
+
+  /// What a failure says on screen, verbatim wherever the wire gave us words.
+  /// Null for the one case that is not a failure: a dismissed password prompt.
+  String? _reason(Object error) => switch (error) {
+    PrivilegedException e => e.cancelled ? null : e.message,
+    UpdateException e => e.message,
+    InvalidCpUrl e => e.message,
+    FileSystemException e =>
+      '${e.path ?? ''}: ${e.osError?.message ?? e.message}'.trim(),
+    _ => '$error',
+  };
 
   Future<bool> _privilegedStep(String command) async {
     if (busy || !_macOs) return false;
@@ -580,6 +689,11 @@ class ManagerStore extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  /// A verified binary [prepare] fetched and nobody has installed yet. Not a
+  /// cache: it is dropped the moment it is used, fails to match, or stops being
+  /// about the control plane in play.
+  File? _prepared;
 
   File? _lastStagedPlist;
 
@@ -631,6 +745,10 @@ class ManagerStore extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    // An executable nobody asked for does not outlive the window that fetched
+    // it. Fire and forget: dispose cannot wait, and a file that survives is
+    // overwritten by the next download anyway.
+    unawaited(_dropPrepared());
     super.dispose();
   }
 }

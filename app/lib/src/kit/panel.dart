@@ -1,9 +1,10 @@
-/// `MeshPanel` — the card, lit from above.
+/// `MeshPanel` — the card, lit from above, and [MeshRingBorder], the lit ring
+/// every surface in the kit wears.
 ///
-/// Also the shapes that go inside one: [MeshDivider], [MeshField] (label above
-/// value), [MeshFact]/[MeshFacts] (label beside value, the CLI's alignment),
-/// [MeshErrorNote], which is how every panel in the app quotes a failure, and
-/// [MeshCommandLine], which is how one quotes a command to run.
+/// Also the shapes that go inside a panel: [MeshDivider], [MeshField] (label
+/// above value), [MeshFact]/[MeshFacts] (label beside value, the CLI's
+/// alignment), [MeshErrorNote] and [MeshWireError], the two ways the app quotes
+/// a failure, and [MeshCommandLine], which is how one quotes a command to run.
 library;
 
 import 'package:flutter/widgets.dart';
@@ -11,9 +12,109 @@ import 'package:flutter/widgets.dart';
 import '../theme/theme.dart';
 import 'copyable.dart';
 
-/// A box lit from above: a fill that breathes lighter at the top, a 1px
-/// hairline border with the `edgeLight` reflection just inside its top, and the
-/// `shade` ambient shadow underneath.
+/// The border of a lit surface: `FilamentTokens.ring` painted as a 1px ring.
+///
+/// One implementation, worn by everything that rings a lit surface — panels,
+/// stat tiles, dialogs, the banner. The ring is a statement about where the
+/// light is, and two surfaces lit from different places would break the room.
+///
+/// It is a [BoxBorder] rather than a painter so a surface keeps the single
+/// [BoxDecoration] it already had: swapping `Border.all(color: hairline)` for
+/// this leaves the fill, the radius, the shade and the layout exactly where
+/// they were, because [dimensions] is still one pixel on every side.
+///
+/// Not interpolable: `BoxBorder.lerp` only knows how to blend `Border`, so a
+/// decoration wearing this ring must not be handed to an `AnimatedContainer`.
+/// Nothing in the kit does — a panel's ring changes with the theme, and the
+/// theme does not crossfade.
+@immutable
+class MeshRingBorder extends BoxBorder {
+  const MeshRingBorder(
+    this.tokens, {
+    this.base,
+    this.opacity = 1,
+    this.width = FilamentMetrics.hairline,
+  });
+
+  final FilamentTokens tokens;
+
+  /// What the sides run at. Null means `hairline`.
+  final Color? base;
+
+  /// Scales the whole ring. Stat tiles wear it at 0.6: a tile sits in the page,
+  /// not on top of it.
+  final double opacity;
+
+  final double width;
+
+  LinearGradient get _gradient => tokens.ring(base: base, opacity: opacity);
+
+  /// The lit top edge, as a plain side. For the rare caller that wants one
+  /// stripe of the ring rather than the ring.
+  @override
+  BorderSide get top => BorderSide(color: _gradient.colors.first, width: width);
+
+  /// The shaded bottom edge, as a plain side.
+  @override
+  BorderSide get bottom =>
+      BorderSide(color: _gradient.colors.last, width: width);
+
+  /// One width the whole way round, which is what uniform means for layout.
+  @override
+  bool get isUniform => true;
+
+  @override
+  EdgeInsetsGeometry get dimensions => EdgeInsets.all(width);
+
+  @override
+  ShapeBorder scale(double t) =>
+      MeshRingBorder(tokens, base: base, opacity: opacity, width: width * t);
+
+  @override
+  void paint(
+    Canvas canvas,
+    Rect rect, {
+    TextDirection? textDirection,
+    BoxShape shape = BoxShape.rectangle,
+    BorderRadius? borderRadius,
+  }) {
+    if (width <= 0 || rect.isEmpty) return;
+    final paint = Paint()
+      // Shaded over the whole box, not over the stroke: the gradient describes
+      // where the light falls on the surface, and the ring samples it.
+      ..shader = _gradient.createShader(rect)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = width
+      ..isAntiAlias = true;
+    // A stroke straddles its path, so the ring runs half a width inside the
+    // box — where [dimensions] has already told the layout it is.
+    switch (shape) {
+      case BoxShape.circle:
+        canvas.drawCircle(rect.center, (rect.shortestSide - width) / 2, paint);
+      case BoxShape.rectangle:
+        canvas.drawRRect(
+          (borderRadius ?? BorderRadius.zero).toRRect(rect).deflate(width / 2),
+          paint,
+        );
+    }
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is MeshRingBorder &&
+      other.tokens.brightness == tokens.brightness &&
+      other.base == base &&
+      other.opacity == opacity &&
+      other.width == width;
+
+  @override
+  int get hashCode => Object.hash(tokens.brightness, base, opacity, width);
+}
+
+/// A box lit from above: a fill that breathes lighter at the top, a
+/// [MeshRingBorder] that catches the same light at the top of the ring and
+/// falls away at the bottom, the `edgeLight` reflection just inside that ring,
+/// and the `shade` ambient shadow underneath.
 ///
 /// Not an elevation ramp — there is one depth in the system and every panel
 /// wears it. The header is a 15px/600 title on the left and actions on the
@@ -61,7 +162,7 @@ class MeshPanel extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         gradient: tokens.panelFill,
-        border: Border.all(color: tokens.hairline),
+        border: MeshRingBorder(tokens),
         borderRadius: BorderRadius.circular(FilamentRadius.panel),
         boxShadow: tokens.shade,
       ),
@@ -360,10 +461,58 @@ class MeshFacts extends StatelessWidget {
   }
 }
 
+/// A failure that arrived over a wire, in the two registers DESIGN.md fixes.
+///
+/// The headline is ours: what happened, in the words the person in front of the
+/// screen would use, and never a path or a URL. Under it, in mono, is whatever
+/// the daemon or the control plane actually said, verbatim — they are better at
+/// saying what went wrong than we are, and rewriting it would only lose the one
+/// detail that turns out to matter.
+///
+/// This is the shape for every primary surface. [MeshErrorNote] is the same
+/// idea with the layers the other way up, for the panels in Settings where the
+/// wire's own words *are* the point and our line is the afterthought.
+class MeshWireError extends StatelessWidget {
+  const MeshWireError({
+    required this.headline,
+    required this.detail,
+    this.hint,
+    super.key,
+  });
+
+  /// Sentence case, one line, our voice.
+  final String headline;
+
+  /// The wire's words. Never rewritten, never truncated.
+  final String detail;
+
+  /// An optional third line in our voice, when there is something to add.
+  final String? hint;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FilamentTheme.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(headline, style: theme.type.emphasis),
+        const SizedBox(height: FilamentSpace.x2),
+        Text(detail, style: theme.type.error),
+        if (hint != null && hint!.isNotEmpty) ...[
+          const SizedBox(height: FilamentSpace.x1 + 1),
+          Text(hint!, style: theme.type.small),
+        ],
+      ],
+    );
+  }
+}
+
 /// An error, quoted verbatim in mono, inside the panel that caused it.
 ///
 /// Never a dialog, never reworded. The daemon and the control plane are better
-/// at saying what went wrong than we are.
+/// at saying what went wrong than we are. See [MeshWireError] for the shape a
+/// primary surface uses, where our headline comes first.
 class MeshErrorNote extends StatelessWidget {
   const MeshErrorNote(this.message, {this.hint, super.key});
 

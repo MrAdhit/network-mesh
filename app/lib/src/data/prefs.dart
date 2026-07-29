@@ -33,10 +33,21 @@ class UiPrefs {
   const UiPrefs({
     this.themeMode = MeshThemeMode.system,
     this.pollInterval = defaultPollInterval,
+    this.setupComplete = false,
   });
 
   final MeshThemeMode themeMode;
   final Duration pollInterval;
+
+  /// Whether this Mac has ever been taken through first run to the end.
+  ///
+  /// The one thing the app remembers about itself rather than about the
+  /// daemon, and the whole of the wizard-or-dashboard decision that is not
+  /// derived from live state: an engine that dies after setup gets a banner on
+  /// the dashboard, where the same picture before setup is the wizard. Set the
+  /// moment the arrival stage runs, and again on any boot that finds this Mac
+  /// already on the mesh; cleared when the user leaves the network.
+  final bool setupComplete;
 
   factory UiPrefs.fromJson(Map<String, Object?> j) {
     final ms = j['poll_interval_ms'];
@@ -52,28 +63,37 @@ class UiPrefs {
       pollInterval: pollIntervalChoices.contains(interval)
           ? interval
           : defaultPollInterval,
+      // Absent means no: an app that has never written this file has never
+      // finished first run either.
+      setupComplete: j['setup_complete'] == true,
     );
   }
 
   Map<String, Object?> toJson() => {
     'theme': themeMode.name,
     'poll_interval_ms': pollInterval.inMilliseconds,
+    'setup_complete': setupComplete,
   };
 
-  UiPrefs copyWith({MeshThemeMode? themeMode, Duration? pollInterval}) =>
-      UiPrefs(
-        themeMode: themeMode ?? this.themeMode,
-        pollInterval: pollInterval ?? this.pollInterval,
-      );
+  UiPrefs copyWith({
+    MeshThemeMode? themeMode,
+    Duration? pollInterval,
+    bool? setupComplete,
+  }) => UiPrefs(
+    themeMode: themeMode ?? this.themeMode,
+    pollInterval: pollInterval ?? this.pollInterval,
+    setupComplete: setupComplete ?? this.setupComplete,
+  );
 
   @override
   bool operator ==(Object other) =>
       other is UiPrefs &&
       other.themeMode == themeMode &&
-      other.pollInterval == pollInterval;
+      other.pollInterval == pollInterval &&
+      other.setupComplete == setupComplete;
 
   @override
-  int get hashCode => Object.hash(themeMode, pollInterval);
+  int get hashCode => Object.hash(themeMode, pollInterval, setupComplete);
 }
 
 /// Reads and writes `ui.json`.
@@ -151,6 +171,10 @@ class PrefsStore extends ChangeNotifier {
     defaultPollInterval,
   );
 
+  /// See [UiPrefs.setupComplete]. A notifier like the other two so the routing
+  /// decision can listen to this one fact rather than to every preference.
+  final ValueNotifier<bool> setupComplete = ValueNotifier(false);
+
   bool _loaded = false;
   bool get loaded => _loaded;
 
@@ -161,12 +185,16 @@ class PrefsStore extends ChangeNotifier {
     final prefs = await _file.load();
     themeMode.value = prefs.themeMode;
     pollInterval.value = prefs.pollInterval;
+    setupComplete.value = prefs.setupComplete;
     _loaded = true;
     notifyListeners();
   }
 
-  UiPrefs get value =>
-      UiPrefs(themeMode: themeMode.value, pollInterval: pollInterval.value);
+  UiPrefs get value => UiPrefs(
+    themeMode: themeMode.value,
+    pollInterval: pollInterval.value,
+    setupComplete: setupComplete.value,
+  );
 
   void setThemeMode(MeshThemeMode mode) {
     if (themeMode.value == mode) return;
@@ -178,6 +206,18 @@ class PrefsStore extends ChangeNotifier {
   void setPollInterval(Duration interval) {
     if (pollInterval.value == interval) return;
     pollInterval.value = interval;
+    notifyListeners();
+    _persist();
+  }
+
+  /// Records that first run finished, or that it has to happen again.
+  ///
+  /// Idempotent, because the app records it from two places: the arrival stage
+  /// says it once, and every boot that finds this Mac already on the mesh says
+  /// it again in case the file was never written.
+  void setSetupComplete(bool value) {
+    if (setupComplete.value == value) return;
+    setupComplete.value = value;
     notifyListeners();
     _persist();
   }
@@ -203,6 +243,7 @@ class PrefsStore extends ChangeNotifier {
   void dispose() {
     themeMode.dispose();
     pollInterval.dispose();
+    setupComplete.dispose();
     super.dispose();
   }
 }

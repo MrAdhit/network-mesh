@@ -193,6 +193,50 @@ class FilamentTokens {
     ];
   }
 
+  /// The ring around a lit surface: a gradient, not a mono hairline.
+  ///
+  /// The border catches the light at the top ([edgeLight] blended into the base
+  /// colour), runs plain down the sides, and sits a touch darker at the bottom,
+  /// so the ring reads as lit from the same place as [panelFill] and [shade].
+  /// It is deliberately quieter than the fill gradient: a border you can watch
+  /// change colour is a border drawing attention to itself.
+  ///
+  /// [base] is what the sides run at — [hairline] unless you say otherwise; a
+  /// dialog, which really is above the page, passes [hairlineHigh]. [opacity]
+  /// scales the whole ring, for surfaces that sit *in* the page rather than on
+  /// top of it.
+  ///
+  /// Painted by `MeshRingBorder` in the kit, which is the only thing that
+  /// should be calling this.
+  LinearGradient ring({Color? base, double opacity = 1}) {
+    final b = base ?? hairline;
+    Color at(Color c) =>
+        opacity >= 1 ? c : c.withValues(alpha: c.a * opacity.clamp(0.0, 1.0));
+    return LinearGradient(
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: <Color>[at(_ringLit(b)), at(b), at(b), at(_ringShaded(b))],
+      // The lit and shaded ends are short: the ring is mostly plain hairline,
+      // and only its extremes report where the light is.
+      stops: const <double>[0, 0.3, 0.72, 1],
+    );
+  }
+
+  /// The top of the ring: the light landing on the edge.
+  ///
+  /// Dark takes the whole of [edgeLight] — white at 6% over a near-black
+  /// hairline is a lift you feel rather than see. Light takes a third of it:
+  /// white at 90% over a pale hairline would erase the top border entirely and
+  /// leave the panel looking unbounded.
+  Color _ringLit(Color base) => Color.alphaBlend(
+    edgeLight.withValues(alpha: edgeLight.a * (isDark ? 1 : 0.35)),
+    base,
+  );
+
+  /// The bottom of the ring: the same edge, in its own shadow.
+  Color _ringShaded(Color base) =>
+      Color.lerp(base, _black, isDark ? 0.22 : 0.14)!;
+
   /// A panel's fill: lighter where the light lands, `surface` where it does
   /// not. Quiet enough that you only notice it when it is gone.
   ///
