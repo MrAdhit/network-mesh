@@ -37,6 +37,7 @@ impl NodeIdentity {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(path, B64.encode(signing.to_bytes()))?;
+        crate::util::restrict(path)?;
         Ok(Self { signing })
     }
 
@@ -46,6 +47,28 @@ impl NodeIdentity {
 
     pub fn public_b64(&self) -> String {
         B64.encode(self.public_bytes())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn a_generated_identity_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("meshident{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("node-identity.key");
+        let id = NodeIdentity::load_or_generate(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "this file is the node's private key");
+        // And it is still the same key when read back through the restricted file.
+        let again = NodeIdentity::load_or_generate(&path).unwrap();
+        assert_eq!(id.public_bytes(), again.public_bytes());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

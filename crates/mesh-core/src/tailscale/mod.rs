@@ -59,6 +59,7 @@ fn load_or_generate_keys(path: &Path) -> Result<NodeState> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, serde_json::to_vec_pretty(&PersistState::from(&ns))?)?;
+    crate::util::restrict(path)?;
     Ok(ns)
 }
 
@@ -433,6 +434,21 @@ async fn pick_region(
 #[cfg(test)]
 mod tests {
     use super::hostname_matches;
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_keys_are_readable_only_by_their_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("meshtskeys{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("tailscale-keys.json");
+        super::load_or_generate_keys(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "this file is the machine key");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn matches_exact_and_deduplicated_names() {

@@ -13,6 +13,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::util::restrict;
+
 /// Where the CLI keeps its configuration.
 ///
 /// `MESH_CONFIG` overrides, which is what a test or a service account wants. Otherwise the
@@ -143,22 +145,6 @@ pub fn same_cp(a: &str, b: &str) -> bool {
     a.trim()
         .trim_end_matches('/')
         .eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
-}
-
-/// Keep the file to its owner.
-///
-/// Best effort on Windows, where ACL inheritance from the user's own AppData directory already
-/// gives roughly this and doing better needs the Win32 security APIs.
-fn restrict(path: &std::path::Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restricting {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
 }
 
 #[cfg(test)]

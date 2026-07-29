@@ -115,6 +115,9 @@ impl NodeState {
         let p = Self::path(dir);
         let tmp = p.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        // Restricted under the temporary name, so the file never exists at the target path
+        // readable by anyone but us.
+        crate::util::restrict(&tmp)?;
         std::fs::rename(&tmp, &p)?;
         Ok(())
     }
@@ -234,6 +237,29 @@ impl std::fmt::Display for CpUrlSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_state_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("meshstate{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let st = NodeState {
+            node_name: "a".into(),
+            ..Default::default()
+        };
+        st.save(&dir).unwrap();
+        // Saving over an existing file has to end up restricted too, not inherit its mode.
+        st.save(&dir).unwrap();
+
+        let mode = std::fs::metadata(NodeState::path(&dir))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "state.json holds the node token");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn runtime_beats_everything() {

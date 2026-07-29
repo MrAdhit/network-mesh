@@ -17,6 +17,28 @@ pub fn version_line(binary: &str) -> String {
     )
 }
 
+/// Keep a file to its owner: mode 0600 on unix.
+///
+/// Every caller is writing a credential, and the directories these land in are traversable on
+/// purpose: the state directory so a non-root client can reach the daemon's socket, a user's
+/// config directory because it is theirs. So the file carries its own protection rather than
+/// relying on the directory's, or on the umask being sane.
+///
+/// Best effort on Windows, where ACL inheritance from ProgramData and AppData already gives
+/// roughly this and doing better needs the Win32 security APIs.
+pub(crate) fn restrict(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use anyhow::Context;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// Seconds since the unix epoch.
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
