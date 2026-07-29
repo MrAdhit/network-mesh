@@ -42,9 +42,13 @@ jobs:
         working-directory: app
         run: dart format --output=none --set-exit-if-changed lib tool
 
+      # The same control plane build.yml bakes into the binaries. The app fetches meshd from
+      # there and bakes it into the launchd job it writes, so a downloaded Mesh.app installs a
+      # daemon pointed at the same place a curl-installed one would be. Runtime MESH_CP_URL and
+      # a stored login still outrank it, in that order.
       - name: Build
         working-directory: app
-        run: flutter build macos --release
+        run: flutter build macos --release --dart-define=MESH_CP_URL=https://mesh.mradhit.net
 
       # Unsigned: signing wants a Developer ID certificate this repository does not carry and
       # notarization wants an Apple account, so Gatekeeper will refuse a double click. Open it

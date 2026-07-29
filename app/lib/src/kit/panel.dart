@@ -1,13 +1,15 @@
 /// `MeshPanel` — the card, lit from above.
 ///
 /// Also the shapes that go inside one: [MeshDivider], [MeshField] (label above
-/// value), [MeshFact]/[MeshFacts] (label beside value, the CLI's alignment) and
-/// [MeshErrorNote], which is how every panel in the app quotes a failure.
+/// value), [MeshFact]/[MeshFacts] (label beside value, the CLI's alignment),
+/// [MeshErrorNote], which is how every panel in the app quotes a failure, and
+/// [MeshCommandLine], which is how one quotes a command to run.
 library;
 
 import 'package:flutter/widgets.dart';
 
 import '../theme/theme.dart';
+import 'copyable.dart';
 
 /// A box lit from above: a fill that breathes lighter at the top, a 1px
 /// hairline border with the `edgeLight` reflection just inside its top, and the
@@ -384,6 +386,37 @@ class MeshErrorNote extends StatelessWidget {
           Text(hint!, style: theme.type.small),
         ],
       ],
+    );
+  }
+}
+
+/// A shell command, in a box, copyable.
+///
+/// The only shape in the app that tells anyone to go and run something: the
+/// chmod that opens a root-only socket, the install.sh one-liner on a platform
+/// this app does not manage. Set in the data face, because a command is a
+/// string to be reproduced exactly and not prose.
+class MeshCommandLine extends StatelessWidget {
+  const MeshCommandLine(this.command, {super.key});
+
+  final String command;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FilamentTheme.of(context);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: theme.tokens.surfaceHigh,
+        border: Border.all(color: theme.tokens.hairline),
+        borderRadius: BorderRadius.circular(FilamentRadius.control),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: FilamentSpace.x3,
+          vertical: FilamentSpace.x2 + 2,
+        ),
+        child: MeshCopyable(command, style: theme.type.mono),
+      ),
     );
   }
 }

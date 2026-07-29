@@ -1,9 +1,14 @@
 /// Overview — the glanceable answer.
 ///
-/// Three pictures, one per state the daemon can be in:
+/// Four pictures, one per state the daemon can be in:
 ///
-/// * unreachable: the OS error verbatim, and on EACCES the explanation that
-///   the socket is root-only plus the chmod that unblocks it today;
+/// * missing or stopped: the manager's front door. The socket is dead and the
+///   app knows why — there is no meshd on this Mac, or there is one and
+///   nothing is running it — so the screen offers the one action that fixes
+///   that and shows the download as it happens;
+/// * unreachable for some other reason: the OS error verbatim, and on EACCES
+///   the explanation that the socket is root-only plus the chmod that unblocks
+///   it today;
 /// * up but not enrolled: the identity hero saying so, and the join card,
 ///   which mints a key inline when there is a control plane session to mint it
 ///   with;
@@ -24,6 +29,7 @@ import 'package:flutter/widgets.dart';
 
 import '../data/daemon_client.dart';
 import '../data/ipc_protocol.dart';
+import '../data/privileged.dart' show MeshdInstall;
 import '../icons/mesh_icons.dart';
 import '../kit/badge.dart';
 import '../kit/button.dart';
@@ -37,8 +43,10 @@ import '../kit/text_field.dart';
 import '../kit/toast.dart';
 import '../state/app_state.dart';
 import '../state/daemon_store.dart';
+import '../state/manager_store.dart';
 import '../theme/theme.dart';
 import '../util/format.dart';
+import 'manager.dart';
 
 class OverviewScreen extends StatelessWidget {
   const OverviewScreen({super.key});
@@ -47,9 +55,15 @@ class OverviewScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final app = AppScope.read(context);
     // The session matters here only because it decides whether the join card
-    // can mint a key; the network store because minting is its call.
+    // can mint a key; the network store because minting is its call; the
+    // manager because a dead socket is its screen.
     return ListenableBuilder(
-      listenable: Listenable.merge([app.daemon, app.session, app.network]),
+      listenable: Listenable.merge([
+        app.daemon,
+        app.session,
+        app.network,
+        app.manager,
+      ]),
       builder: (context, _) {
         final daemon = app.daemon;
         return MeshScreen(
@@ -62,19 +76,34 @@ class OverviewScreen extends StatelessWidget {
               action: daemon.refreshNow,
             ),
           ],
-          children: _blocks(context, daemon),
+          children: _blocks(context, daemon, app.manager),
         );
       },
     );
   }
 
-  List<Widget> _blocks(BuildContext context, DaemonStore daemon) {
+  List<Widget> _blocks(
+    BuildContext context,
+    DaemonStore daemon,
+    ManagerStore manager,
+  ) {
     if (!daemon.firstPollComplete) {
       return const [_ConnectingPanel()];
     }
     if (!daemon.reachable) {
+      // A root-only socket is not a story about installing anything: meshd is
+      // there and answering somebody, and the chmod hint below is the fix.
+      final denied = daemon.error is DaemonPermissionDenied;
+      // Before the first look at the disk there is nothing the manager can
+      // honestly say, so the socket's own account of itself stands alone.
+      final manage = !denied && manager.inspected;
       return [
-        _UnreachablePanel(daemon: daemon),
+        if (manage) _ManagerPanel(manager: manager),
+        // Nothing installed is the whole explanation; the socket failing to
+        // connect to a daemon that does not exist adds a second panel saying
+        // the same thing in a worse voice.
+        if (!manage || !manager.supported || manager.installed)
+          _UnreachablePanel(daemon: daemon),
         // Whatever we knew before the socket went away is still worth showing,
         // clearly marked as no longer current. Stale facts keep their panel:
         // the badge and the header are what say they are not live any more.
@@ -589,6 +618,143 @@ class _JoinCardState extends State<_JoinCard> {
 }
 
 // ---------------------------------------------------------------------------
+// the manager's front door
+// ---------------------------------------------------------------------------
+
+/// What to do about a daemon that is not there.
+///
+/// Three pictures, chosen off facts rather than off the derived state, so a
+/// panel does not reshape itself half way through an install: this Mac has no
+/// meshd, this Mac has one that nothing is running, or this is not a Mac.
+///
+/// The panel carries one primary action and the facts that action is about —
+/// which control plane the binary comes from, which build, where it lands. The
+/// progress of the download and the authorization step appear underneath it,
+/// and so does whatever failed last, verbatim.
+class _ManagerPanel extends StatelessWidget {
+  const _ManagerPanel({required this.manager});
+
+  final ManagerStore manager;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FilamentTheme.of(context);
+    final tokens = theme.tokens;
+
+    if (!manager.supported) {
+      return MeshPanel(
+        title: 'meshd is not managed from here',
+        child: ManagerUnsupportedNote(manager: manager),
+      );
+    }
+
+    final installed = manager.installed;
+    final target = manager.target;
+
+    return MeshPanel(
+      title: installed
+          ? 'meshd is installed but not running'
+          : 'meshd is not installed on this Mac',
+      subtitle: installed
+          ? 'The launchd job is what starts it'
+          : 'The app fetches it from the control plane and runs it under '
+                'launchd',
+      accent: tokens.caution,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          MeshFacts([
+            MeshFact(
+              label: 'Control plane',
+              child: Row(
+                children: [
+                  Flexible(child: MeshCopyable(manager.cpUrl.url)),
+                  const SizedBox(width: FilamentSpace.x2),
+                  MeshBadge(manager.cpUrl.source.label),
+                ],
+              ),
+            ),
+            MeshFact(
+              label: 'Target',
+              child: target == null
+                  ? Text(
+                      'No meshd build for this Mac',
+                      style: theme.type.bodyDim,
+                    )
+                  : Text(target, style: theme.type.mono),
+            ),
+            if (installed)
+              MeshFact(
+                label: 'Build',
+                child: ManagerBuild(
+                  sha256: manager.installedSha256,
+                  size: manager.installedSize,
+                ),
+              ),
+            if (installed)
+              MeshFact(
+                label: 'Service',
+                child: ManagerServiceLine(
+                  loaded: manager.serviceLoaded,
+                  plistPresent: manager.plistPresent,
+                ),
+              )
+            else
+              MeshFact(
+                label: 'Installs to',
+                child: MeshCopyable(
+                  MeshdInstall.binary,
+                  style: theme.type.monoSmall,
+                ),
+              ),
+          ], gap: FilamentSpace.x4),
+          const SizedBox(height: FilamentSpace.x5),
+          Row(
+            children: [
+              MeshAsyncButton(
+                label: installed ? 'Start meshd' : 'Install meshd',
+                variant: MeshButtonVariant.primary,
+                autofocus: true,
+                tooltip: _why(installed, target),
+                action: _action(installed, target),
+              ),
+              const SizedBox(width: FilamentSpace.x3),
+              Flexible(
+                child: Text(
+                  installed
+                      ? 'Loading the job asks for an administrator password '
+                            'once.'
+                      : 'Downloading is unprivileged; installing asks for an '
+                            'administrator password once.',
+                  style: theme.type.small,
+                ),
+              ),
+            ],
+          ),
+          ManagerActivity(manager: manager),
+        ],
+      ),
+    );
+  }
+
+  /// Null when the button should work, and the reason it does not otherwise —
+  /// the tooltip and the disabled state come from the same answer.
+  String? _why(bool installed, String? target) {
+    if (manager.busy) return 'Already working on it';
+    if (!installed && target == null) {
+      return 'The control plane publishes no build for this machine';
+    }
+    return null;
+  }
+
+  Future<void> Function()? _action(bool installed, String? target) {
+    if (_why(installed, target) != null) return null;
+    return installed ? () => manager.start() : () => manager.install();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // unreachable
 // ---------------------------------------------------------------------------
 
@@ -659,7 +825,7 @@ class _UnreachablePanel extends StatelessWidget {
             ),
             const SizedBox(height: FilamentSpace.x3),
             // The socket the failure names, which is the one to relax.
-            _CommandLine(command: 'sudo chmod 666 ${error.endpoint}'),
+            MeshCommandLine('sudo chmod 666 ${error.endpoint}'),
           ],
           const SizedBox(height: FilamentSpace.x5),
           MeshField(
@@ -670,33 +836,6 @@ class _UnreachablePanel extends StatelessWidget {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// A shell command, in a box, copyable. The only place the app tells anyone to
-/// run something.
-class _CommandLine extends StatelessWidget {
-  const _CommandLine({required this.command});
-
-  final String command;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = FilamentTheme.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: theme.tokens.surfaceHigh,
-        border: Border.all(color: theme.tokens.hairline),
-        borderRadius: BorderRadius.circular(FilamentRadius.control),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: FilamentSpace.x3,
-          vertical: FilamentSpace.x2 + 2,
-        ),
-        child: MeshCopyable(command, style: theme.type.mono),
       ),
     );
   }

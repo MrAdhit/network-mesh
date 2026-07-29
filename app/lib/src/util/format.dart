@@ -60,6 +60,46 @@ MeasureParts percentParts(double? pct, {int decimals = 1}) => (
 MeasureParts countParts(double? n) =>
     (value: n == null || !n.isFinite ? '—' : n.round().toString(), unit: '');
 
+// ---- sizes ----
+
+/// The units a file size is reported in. Decimal, not binary: the number these
+/// scale is a byte count the control plane published and a download readout
+/// counts up to, which is the same thing every other download in the operating
+/// system reports in MB, and nothing here is an allocation.
+const List<String> _sizeUnits = <String>['B', 'KB', 'MB', 'GB', 'TB'];
+
+/// A byte count split from its unit, at [formatMs]'s precision: two decimals
+/// under 10, one under 100, none above. Bytes themselves stay whole.
+///
+/// `null` becomes a dash with no unit, the same way a missing RTT does.
+MeasureParts bytesParts(int? bytes) {
+  if (bytes == null || bytes < 0) return (value: '—', unit: '');
+  var v = bytes.toDouble();
+  var unit = 0;
+  while (v >= 1000 && unit < _sizeUnits.length - 1) {
+    v /= 1000;
+    unit++;
+  }
+  final String value;
+  if (unit == 0) {
+    value = v.toStringAsFixed(0);
+  } else if (v < 10) {
+    value = v.toStringAsFixed(2);
+  } else if (v < 100) {
+    value = v.toStringAsFixed(1);
+  } else {
+    value = v.toStringAsFixed(0);
+  }
+  return (value: value, unit: _sizeUnits[unit]);
+}
+
+/// [bytesParts] joined, for the places that cannot style the unit apart —
+/// tooltips and the odd sentence.
+String formatBytes(int? bytes) {
+  final parts = bytesParts(bytes);
+  return parts.unit.isEmpty ? parts.value : '${parts.value} ${parts.unit}';
+}
+
 // ---- durations ----
 
 /// Uptime as `3d 4h 12m`: at most three units, starting at the largest

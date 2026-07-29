@@ -1,10 +1,12 @@
-/// The three stores, one scope, and the rail status folded out of them.
+/// The four stores, one scope, and the rail status folded out of them.
 ///
 /// `AppScope` is the only inherited widget in the app. It carries [AppState],
 /// which owns the stores and forwards their notifications so a widget that
 /// wants everything can just depend on the scope; a widget that wants one
 /// store reads it through [AppScope.read] and listens to that store alone.
 library;
+
+import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
@@ -13,6 +15,7 @@ import '../data/prefs.dart';
 import '../kit/path_triad.dart';
 import '../kit/rail.dart';
 import 'daemon_store.dart';
+import 'manager_store.dart';
 import 'network_store.dart';
 import 'session_store.dart';
 
@@ -22,9 +25,11 @@ class AppState extends ChangeNotifier {
     SessionStore? session,
     DaemonStore? daemon,
     NetworkStore? network,
+    ManagerStore? manager,
   }) : prefs = prefs ?? PrefsStore(),
        session = session ?? SessionStore(),
-       daemon = daemon ?? DaemonStore() {
+       daemon = daemon ?? DaemonStore(),
+       manager = manager ?? ManagerStore() {
     this.network = network ?? NetworkStore(session: this.session);
 
     this.daemon.pollInterval = this.prefs.pollInterval.value;
@@ -34,6 +39,15 @@ class AppState extends ChangeNotifier {
     this.session.addListener(_onChild);
     this.daemon.addListener(_onChild);
     this.network.addListener(_onChild);
+    this.manager.addListener(_onChild);
+
+    // The two things the manager cannot work out for itself: which control
+    // plane is in play, and whether the socket answers. Both are owned by
+    // another store, and neither is worth a second copy of the logic.
+    this.manager
+      ..cpUrl = this.session.cpUrl
+      ..daemonReachable = this.daemon.reachableOrUnknown
+      ..onApplied = this.daemon.refreshNow;
 
     _updateRail();
   }
@@ -41,6 +55,7 @@ class AppState extends ChangeNotifier {
   final PrefsStore prefs;
   final SessionStore session;
   final DaemonStore daemon;
+  final ManagerStore manager;
   late final NetworkStore network;
 
   /// What the rail's bottom block renders. A `ValueNotifier` rather than a
@@ -66,12 +81,23 @@ class AppState extends ChangeNotifier {
     await prefs.load();
     daemon.pollInterval = prefs.pollInterval.value;
     await session.load();
+    manager.cpUrl = session.cpUrl;
     daemon.start();
+    // Looking at the disk is fast and tells the Overview whether it is a
+    // window or a front door. The control plane is asked afterwards, and only
+    // if it has not been asked in the last six hours.
+    await manager.refresh();
+    unawaited(manager.checkForUpdates());
   }
 
   void _onPollInterval() => daemon.pollInterval = prefs.pollInterval.value;
 
   void _onChild() {
+    // Setters, so a value that did not move notifies nobody and this cannot
+    // become a loop through the manager's own listener.
+    manager
+      ..cpUrl = session.cpUrl
+      ..daemonReachable = daemon.reachableOrUnknown;
     _updateRail();
     if (!_disposed) notifyListeners();
   }
@@ -130,8 +156,10 @@ class AppState extends ChangeNotifier {
     session.removeListener(_onChild);
     daemon.removeListener(_onChild);
     network.removeListener(_onChild);
+    manager.removeListener(_onChild);
     railStatus.dispose();
     network.dispose();
+    manager.dispose();
     daemon.dispose();
     session.dispose();
     prefs.dispose();
@@ -163,4 +191,5 @@ class AppScope extends InheritedNotifier<AppState> {
   static SessionStore sessionOf(BuildContext context) => read(context).session;
   static NetworkStore networkOf(BuildContext context) => read(context).network;
   static PrefsStore prefsOf(BuildContext context) => read(context).prefs;
+  static ManagerStore managerOf(BuildContext context) => read(context).manager;
 }
