@@ -18,6 +18,7 @@ import 'package:flutter/widgets.dart';
 
 import '../data/cp_client.dart';
 import '../data/cp_models.dart';
+import '../data/privileged.dart' show thisMachineCapitalized;
 import '../icons/mesh_icons.dart';
 import '../kit/badge.dart';
 import '../kit/button.dart';
@@ -603,8 +604,8 @@ class _SignInRevealState extends State<_SignInReveal> {
                 const SizedBox(height: FilamentSpace.x3),
                 Text(
                   'Managing it means adding machines, taking them off, and '
-                  'setting up the paths they reach each other on. This Mac '
-                  'stays on the mesh either way.',
+                  'setting up the paths they reach each other on. '
+                  '$thisMachineCapitalized stays on the mesh either way.',
                   style: theme.type.bodyDim,
                   textAlign: TextAlign.center,
                 ),

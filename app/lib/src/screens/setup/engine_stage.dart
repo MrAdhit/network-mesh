@@ -9,13 +9,18 @@
 /// `SetupFlow` moves on — the daemon is the authority on whether the engine is
 /// running, and a "done, continue" button would only be asking the user to
 /// confirm something the app can already see.
+///
+/// All of that is the macOS stage. The other two are in [_unsupported], and
+/// neither one may borrow a word of it: the password, the prompt and the
+/// install are macOS's, and a Linux screen that mentions them is describing
+/// something that is not going to happen.
 library;
 
 import 'dart:async' show unawaited;
-import 'dart:io' show Platform;
 
 import 'package:flutter/widgets.dart';
 
+import '../../data/privileged.dart' show HostPlatform;
 import '../../kit/button.dart';
 import '../../kit/panel.dart';
 import '../../kit/progress.dart';
@@ -203,11 +208,16 @@ class _EngineStageState extends State<EngineStage> {
     _ => const MeshProgress.indeterminate(label: 'Getting ready'),
   };
 
-  /// The two platforms this app cannot install anything on.
+  /// The platforms this app cannot install anything on.
   ///
   /// Linux has a way in, so it gets the command and the promise that the screen
-  /// is watching. Windows gets the sentence, because there is nothing else that
-  /// is true.
+  /// is watching — `SetupFlow` is listening to the same socket the daemon will
+  /// bind, and moves the flow on by itself the moment something answers.
+  /// Windows gets one sentence and no button, because there is nothing else
+  /// that is true: no build, no transport, and no stage after this one.
+  ///
+  /// Not a word about launchd, administrator passwords or macOS anywhere on
+  /// this path. None of it is happening here.
   Widget _unsupported(BuildContext context, ManagerStore manager) {
     final theme = FilamentTheme.of(context);
     final oneLiner = manager.installOneLiner;
@@ -215,7 +225,7 @@ class _EngineStageState extends State<EngineStage> {
     if (oneLiner == null) {
       return MeshStage(
         title: 'Setting up the mesh engine',
-        message: Platform.isWindows
+        message: manager.platform == HostPlatform.windows
             ? 'The mesh engine does not run on Windows yet.'
             : 'The mesh engine cannot be installed from this app on this '
                   'system.',

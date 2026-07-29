@@ -72,18 +72,25 @@ class ManagerStore extends ChangeNotifier {
     Directory? stagingDirectory,
     File? checkMarker,
     ProcessRunner? runProcess,
-    bool? macOs,
+    HostPlatform? platform,
     DateTime Function()? clock,
   }) : _environment = environment ?? Platform.environment,
        _privileged = privileged ?? const OsascriptExecutor(),
        _updateClientFor =
            updateClientFor ?? ((base) => UpdateClient(baseUrl: base)),
-       _detectTarget = detectTargetOverride ?? detectTarget,
+       // Both seams, threaded: a store told it is on Linux must not reach a
+       // real `uname` through the one function here that forks on its own.
+       _detectTarget =
+           detectTargetOverride ??
+           (() => detectTarget(
+             runProcess: runProcess,
+             platform: platform ?? HostPlatform.current,
+           )),
        _binary = installedBinary ?? File(MeshdInstall.binary),
        _plist = plistFile ?? File(MeshdInstall.plistPath),
        _staging = stagingDirectory ?? Directory.systemTemp,
        _runProcess = runProcess ?? Process.run,
-       _macOs = macOs ?? Platform.isMacOS,
+       _platform = platform ?? HostPlatform.current,
        _now = clock ?? DateTime.now {
     _downloads =
         downloadsDirectory ?? Directory(_defaultDownloadsPath(_environment));
@@ -104,7 +111,7 @@ class ManagerStore extends ChangeNotifier {
   final File _plist;
   final Directory _staging;
   final ProcessRunner _runProcess;
-  final bool _macOs;
+  final HostPlatform _platform;
   final DateTime Function() _now;
 
   late final Directory _downloads;
@@ -173,7 +180,7 @@ class ManagerStore extends ChangeNotifier {
 
   /// The one thing that is true right now.
   ManagerState get state {
-    if (!_macOs) return ManagerState.unsupported;
+    if (!supported) return ManagerState.unsupported;
     final busy = _busy;
     if (busy != null) return busy;
     if (_daemonReachable == true) {
@@ -273,25 +280,29 @@ class ManagerStore extends ChangeNotifier {
 
   // -- the platforms we are not -------------------------------------------
 
-  bool get supported => _macOs;
+  /// Which desktop this store was built for. The screens switch on it; nothing
+  /// in the app reads `Platform.isX` for this decision twice.
+  HostPlatform get platform => _platform;
 
-  /// What to say on a platform this cannot manage.
-  String? get unsupportedMessage {
-    if (_macOs) return null;
-    if (Platform.isLinux) {
-      return 'This app manages meshd on macOS. On Linux, install it with the '
-          'one-liner and the app will talk to it.';
-    }
-    if (Platform.isWindows) {
-      return 'meshd does not run on Windows yet.';
-    }
-    return 'This app manages meshd on macOS.';
-  }
+  /// This app can install and run meshd here: macOS, and only macOS.
+  bool get supported => _platform.managesDaemon;
+
+  /// What to say on a platform this cannot manage. Settings' vocabulary — the
+  /// setup flow says the same thing in the product's words on its own stage.
+  String? get unsupportedMessage => switch (_platform) {
+    HostPlatform.macOS => null,
+    HostPlatform.linux =>
+      'This app manages meshd on macOS. On Linux, install it with the '
+          'one-liner and the app will talk to it.',
+    HostPlatform.windows => 'meshd does not run on Windows yet.',
+    HostPlatform.other => 'This app manages meshd on macOS.',
+  };
 
   /// The install.sh one-liner for the effective control plane, for Linux to
   /// show and copy. Null anywhere it would not work.
-  String? get installOneLiner =>
-      Platform.isLinux ? 'curl -fsSL ${_cpUrl.url}/install.sh | sh' : null;
+  String? get installOneLiner => _platform == HostPlatform.linux
+      ? 'curl -fsSL ${_cpUrl.url}/install.sh | sh'
+      : null;
 
   // -- looking --------------------------------------------------------------
 
@@ -301,7 +312,7 @@ class ManagerStore extends ChangeNotifier {
   /// when its size or mtime moved, because hashing tens of megabytes on a
   /// poll tick would be heat for nothing.
   Future<void> refresh() async {
-    if (!_macOs) {
+    if (!supported) {
       _inspected = true;
       notifyListeners();
       return;
@@ -350,7 +361,13 @@ class ManagerStore extends ChangeNotifier {
 
   /// `launchctl print` on the system domain answers for any user: it reports
   /// whether the label is loaded without being able to change anything.
+  ///
+  /// Gated here as well as in [refresh], its only caller. This is the one place
+  /// in the store that starts a process, launchctl is a program the other two
+  /// desktops do not have, and a guard that lives one call away from the fork
+  /// is a guard somebody will refactor past.
   Future<bool> _isServiceLoaded() async {
+    if (!supported) return false;
     try {
       final result = await _runProcess('/bin/launchctl', [
         'print',
@@ -371,7 +388,7 @@ class ManagerStore extends ChangeNotifier {
   /// recorded and dropped: being unable to reach a control plane is not a
   /// reason to make the rest of the screen unusable.
   Future<void> checkForUpdates({bool force = false}) async {
-    if (!_macOs || _checking) return;
+    if (!supported || _checking) return;
     if (!force && !(await _stale())) return;
 
     final target = _target ??= await _detectTarget();
@@ -457,7 +474,7 @@ class ManagerStore extends ChangeNotifier {
   /// set, when there is not. Does nothing at all when the binary is already
   /// installed or something else is in flight.
   Future<bool> prepare() async {
-    if (busy || !_macOs || _installed) return false;
+    if (busy || !supported || _installed) return false;
     _beginFetch();
     File? staged;
     try {
@@ -501,7 +518,7 @@ class ManagerStore extends ChangeNotifier {
   Future<bool> _fetchThenApply({
     required Future<String> Function(File staged) build,
   }) async {
-    if (busy || !_macOs) return false;
+    if (busy || !supported) return false;
 
     _beginFetch();
 
@@ -672,7 +689,7 @@ class ManagerStore extends ChangeNotifier {
   };
 
   Future<bool> _privilegedStep(String command) async {
-    if (busy || !_macOs) return false;
+    if (busy || !supported) return false;
     _error = null;
     _enter(ManagerState.awaitingAdmin);
     try {

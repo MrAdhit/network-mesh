@@ -2,7 +2,9 @@
 ///
 /// Polls `status` and, when enrolled, `peers` on the configured interval and
 /// backs off to five seconds while the daemon is unreachable — a dead socket
-/// should not be dialled twice a second forever.
+/// should not be dialled twice a second forever. On a platform whose transport
+/// the app has no way to open it makes exactly one call and stops; see
+/// [DaemonStore._schedule].
 ///
 /// It also keeps what the daemon does not: a per-peer, per-path ring of ewma
 /// RTTs, which is where the sparklines come from. The daemon reports an
@@ -291,6 +293,15 @@ class DaemonStore extends ChangeNotifier {
     _timer?.cancel();
     _timer = null;
     if (!_running || _disposed) return;
+    // A transport this platform has no implementation for does not start
+    // working between two ticks. The first call still happens — every screen
+    // waits on `firstPollComplete` before it says anything, and the answer it
+    // records is the honest one — but a loop after that is a timer waking the
+    // app up twelve times a minute to fail the same way.
+    if (!client.transportSupported && _firstPollComplete) {
+      _running = false;
+      return;
+    }
     if (immediate) {
       // Unawaited on purpose: the loop reschedules itself from inside _poll.
       unawaited(_poll());

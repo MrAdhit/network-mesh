@@ -57,13 +57,18 @@ class SetupFlow extends StatefulWidget {
   /// crossfades to the shell; this widget never unmounts itself.
   final VoidCallback onFinished;
 
-  /// Where first run begins on this Mac.
+  /// Where first run begins on this machine.
   ///
   /// The socket outranks the disk, as everywhere else: something answering is
   /// proof the engine is running, and nothing on disk is proof of anything.
   /// Only call this once boot has settled — `AppState.bootSettled` — or it will
-  /// answer for a Mac nobody has looked at yet.
+  /// answer for a machine nobody has looked at yet.
   static SetupStage stageFor(AppState app) {
+    // A platform with no daemon opens on the stage that says so and stops
+    // there. Welcoming somebody into a flow that cannot finish, and then
+    // asking them to press a button to be told no, is worse than saying it on
+    // the first screen.
+    if (!app.manager.platform.runsDaemon) return SetupStage.engine;
     if (app.daemon.reachable) {
       return app.daemon.enrolled ? SetupStage.arrival : SetupStage.network;
     }

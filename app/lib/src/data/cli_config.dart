@@ -13,6 +13,8 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import 'privileged.dart' show HostPlatform;
+
 // ---------------------------------------------------------------------------
 // the record
 // ---------------------------------------------------------------------------
@@ -125,13 +127,19 @@ String? defaultConfigPath({Map<String, String>? environment}) {
 }
 
 /// The directory `config.json` and `ui.json` share.
+///
+/// Three branches for three platforms, in the same order and with the same
+/// answers as the `#[cfg]` blocks in `default_config_path()`. The platform is
+/// asked through [HostPlatform] rather than `Platform.isX` so all three can be
+/// checked from one machine — a per-OS path that only its own OS can evaluate
+/// is a path nobody ever looks at until a user is standing on it.
 String? _configDir(Map<String, String> env) {
-  if (Platform.isWindows) {
+  if (HostPlatform.current == HostPlatform.windows) {
     final appData = env['APPDATA'];
     if (appData == null || appData.isEmpty) return null;
     return _join([appData, 'mesh']);
   }
-  if (Platform.isMacOS) {
+  if (HostPlatform.current.isMacOS) {
     final home = env['HOME'];
     if (home == null || home.isEmpty) return null;
     return _join([home, 'Library', 'Application Support', 'mesh']);
@@ -276,7 +284,7 @@ class CliConfigStore {
 /// than ignored: the alternative is leaving a credential at whatever the umask
 /// happened to produce, which is precisely what the Rust refuses to do.
 Future<void> _restrict(String path) async {
-  if (Platform.isWindows) return;
+  if (HostPlatform.current == HostPlatform.windows) return;
   final result = await Process.run('/bin/chmod', ['600', path]);
   if (result.exitCode != 0) {
     throw CliConfigException(

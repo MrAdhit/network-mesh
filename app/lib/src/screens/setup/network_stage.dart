@@ -16,6 +16,7 @@ library;
 
 import 'package:flutter/widgets.dart';
 
+import '../../data/privileged.dart' show thisMachine;
 import '../../kit/button.dart';
 import '../../kit/stage.dart';
 import '../../kit/text_field.dart';
@@ -149,7 +150,7 @@ class _NetworkStageState extends State<NetworkStage> {
     if (key == null) {
       setState(
         () => _failure = _wire(
-          "Couldn't add this Mac to your network",
+          "Couldn't add $thisMachine to your network",
           app.network.keyError?.message,
         ),
       );
@@ -280,7 +281,7 @@ class _NetworkStageState extends State<NetworkStage> {
     final key = SetupCard(
       title: 'I have an enrollment key',
       message: _path == _Path.key
-          ? 'Paste it and this Mac joins.'
+          ? 'Paste it and $thisMachine joins.'
           : 'Somebody who runs the network sent you one.',
       onOpen: _path == _Path.key ? null : () => _open(_Path.key),
       child: _path == _Path.key ? _keyForm(app.daemon) : null,
@@ -310,10 +311,10 @@ class _NetworkStageState extends State<NetworkStage> {
 
   String _operatorMessage(SessionStore session) {
     if (_path != _Path.operator) {
-      return 'Sign in, and this Mac joins with one click.';
+      return 'Sign in, and $thisMachine joins with one click.';
     }
     return session.hasSession
-        ? 'One click and this Mac is on it.'
+        ? 'One click and $thisMachine is on it.'
         : _mode.message;
   }
 
@@ -360,7 +361,7 @@ class _NetworkStageState extends State<NetworkStage> {
           Text('Signed in as $who', style: FilamentTheme.typeOf(context).body),
           const SizedBox(height: FilamentSpace.x5),
           MeshButton.primary(
-            label: 'Join this Mac',
+            label: 'Join $thisMachine',
             expand: true,
             busy: busy,
             onPressed: () => _joinAsOperator(app),

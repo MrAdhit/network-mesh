@@ -16,6 +16,10 @@
 /// constants, the staged sources are paths this app chose, quoted for `sh`
 /// anyway, and the control plane URL is validated as a URL before it is allowed
 /// anywhere near the plist.
+///
+/// Because all of that is macOS and nothing else, this is also where the app
+/// keeps [HostPlatform]: the one place it asks which desktop it is on, and the
+/// list of what each one gets.
 library;
 
 import 'dart:io';
@@ -23,6 +27,69 @@ import 'dart:io';
 /// How a subprocess gets run. A seam, so tests can answer without forking.
 typedef ProcessRunner =
     Future<ProcessResult> Function(String executable, List<String> arguments);
+
+// ---------------------------------------------------------------------------
+// which desktop this is
+// ---------------------------------------------------------------------------
+
+/// The desktop the app is running on, asked once instead of everywhere.
+///
+/// Everything above depends on osascript, launchctl, `/usr/local` and
+/// `/Library/LaunchDaemons`, none of which exist off macOS, so every screen
+/// that could reach one of them has to know where it is. They all ask this
+/// rather than `Platform.isX` for two reasons: the answers to "what does this
+/// platform get" are then one list instead of a dozen scattered conditions, and
+/// [current] is assignable, which is the only way to put a Linux or a Windows
+/// in front of the app on a Mac and see what it renders.
+enum HostPlatform {
+  macOS,
+  linux,
+  windows,
+
+  /// A unix that is neither. The socket transport works there; nothing this app
+  /// can do installs a daemon on it.
+  other;
+
+  /// What this process is actually running on.
+  ///
+  /// Assignable for tests, which set it and put it back. Nothing in the app
+  /// ever writes it.
+  static HostPlatform current = detect();
+
+  static HostPlatform detect() {
+    if (Platform.isMacOS) return HostPlatform.macOS;
+    if (Platform.isLinux) return HostPlatform.linux;
+    if (Platform.isWindows) return HostPlatform.windows;
+    return HostPlatform.other;
+  }
+
+  bool get isMacOS => this == HostPlatform.macOS;
+
+  /// The app installs, starts, stops and updates meshd itself here. macOS only,
+  /// and everything in this file is why.
+  bool get managesDaemon => isMacOS;
+
+  /// meshd runs here at all, whoever put it there — the app talks to a daemon
+  /// it did not install on Linux, and cannot on Windows, where there is no
+  /// build and no transport dart:io can open.
+  bool get runsDaemon => this != HostPlatform.windows;
+
+  /// The daemon listens on a unix socket here. False on Windows, where it is a
+  /// named pipe with no dart:io equivalent.
+  bool get hasUnixSocket => this != HostPlatform.windows;
+}
+
+/// What the app calls the machine it is running on, in its own voice.
+///
+/// "This Mac" is the sentence DESIGN.md writes, and on a Mac it is the right
+/// one — but it is a proper noun, and on a Linux box it is simply false. One
+/// getter, so the platform is checked once rather than at every sentence.
+String get thisMachine =>
+    HostPlatform.current.isMacOS ? 'this Mac' : 'this machine';
+
+/// [thisMachine] where a sentence starts.
+String get thisMachineCapitalized =>
+    HostPlatform.current.isMacOS ? 'This Mac' : 'This machine';
 
 // ---------------------------------------------------------------------------
 // the installation

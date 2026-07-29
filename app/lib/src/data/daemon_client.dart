@@ -17,17 +17,23 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'ipc_protocol.dart';
+import 'privileged.dart' show HostPlatform;
 
 /// Where the daemon listens, resolved exactly the way `default_endpoint()` in
 /// `ipc.rs` resolves it.
 ///
 /// `MESH_SOCKET` wins outright. Otherwise the socket sits in the state
 /// directory, which is `/var/lib/mesh` unless `MESH_STATE_DIR` says otherwise.
-String resolveDaemonEndpoint({Map<String, String>? environment}) {
+String resolveDaemonEndpoint({
+  Map<String, String>? environment,
+  HostPlatform? platform,
+}) {
   final env = environment ?? Platform.environment;
   final explicit = env['MESH_SOCKET'];
   if (explicit != null && explicit.isNotEmpty) return explicit;
-  if (Platform.isWindows) return r'\\.\pipe\meshd';
+  if (!(platform ?? HostPlatform.current).hasUnixSocket) {
+    return r'\\.\pipe\meshd';
+  }
   final dir = env['MESH_STATE_DIR'];
   final base = (dir != null && dir.isNotEmpty) ? dir : '/var/lib/mesh';
   return base.endsWith(Platform.pathSeparator)
@@ -116,10 +122,24 @@ class DaemonRefused extends DaemonException {
 
 /// A stateless caller. Holding one is free; every method dials its own socket.
 class DaemonClient {
-  DaemonClient({String? endpoint, Map<String, String>? environment})
-    : endpoint = endpoint ?? resolveDaemonEndpoint(environment: environment);
+  DaemonClient({
+    String? endpoint,
+    Map<String, String>? environment,
+    HostPlatform? platform,
+  }) : endpoint =
+           endpoint ??
+           resolveDaemonEndpoint(environment: environment, platform: platform),
+       transportSupported = (platform ?? HostPlatform.current).hasUnixSocket;
 
   final String endpoint;
+
+  /// Whether this platform has a transport the app can actually open.
+  ///
+  /// False on Windows and nowhere else. Exposed rather than left inside [call]
+  /// because a caller that polls needs to know the difference between a daemon
+  /// that is not answering yet and a transport that will never exist: the first
+  /// is worth dialling again in five seconds, the second is not.
+  final bool transportSupported;
 
   /// Long enough that a busy daemon still answers, short enough that a dead
   /// one does not stall a 2s poll cycle.
@@ -150,7 +170,7 @@ class DaemonClient {
 
   /// One request, one response. Throws a [DaemonException] and nothing else.
   Future<MeshResponse> call(MeshRequest request, {Duration? timeout}) async {
-    if (Platform.isWindows) {
+    if (!transportSupported) {
       throw DaemonUnsupportedPlatform(
         endpoint,
         'the daemon speaks a named pipe on Windows and this app cannot open '

@@ -17,12 +17,13 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show File, HttpException, Platform, Process, SocketException;
+import 'dart:io' show File, HttpException, Process, SocketException;
 
 import 'package:http/http.dart' as http;
 
 import '../util/sha256.dart';
-import 'privileged.dart' show InvalidCpUrl, ProcessRunner, validatedCpUrl;
+import 'privileged.dart'
+    show HostPlatform, InvalidCpUrl, ProcessRunner, validatedCpUrl;
 
 // ---------------------------------------------------------------------------
 // targets
@@ -39,8 +40,15 @@ const String targetIntelMac = 'x86_64-apple-darwin';
 /// control plane files its builds under. Null when this is not a Mac or when
 /// `uname` says something no build exists for; the caller says so rather than
 /// guessing a triple and getting a 404 it cannot explain.
-Future<String?> detectTarget({ProcessRunner? runProcess}) async {
-  if (!Platform.isMacOS) return null;
+///
+/// The platform check comes first and is a seam rather than `Platform.isMacOS`,
+/// because `uname` is not a program Windows has: a caller that has been told it
+/// is on Windows must not fork one to find that out.
+Future<String?> detectTarget({
+  ProcessRunner? runProcess,
+  HostPlatform? platform,
+}) async {
+  if (!(platform ?? HostPlatform.current).managesDaemon) return null;
   final run = runProcess ?? Process.run;
   try {
     final result = await run('/usr/bin/uname', ['-m']);

@@ -19,6 +19,7 @@ library;
 import 'package:flutter/widgets.dart';
 
 import '../data/ipc_protocol.dart';
+import '../data/privileged.dart' show thisMachineCapitalized;
 import '../icons/mesh_icons.dart';
 import '../kit/badge.dart';
 import '../kit/banner.dart';
@@ -49,7 +50,7 @@ class OverviewScreen extends StatelessWidget {
         final daemon = app.daemon;
         return MeshScreen(
           title: 'Overview',
-          subtitle: 'This Mac on the mesh',
+          subtitle: '$thisMachineCapitalized on the mesh',
           actions: [
             MeshAsyncIconButton(
               glyph: MeshGlyph.refresh,
@@ -461,7 +462,7 @@ class _Stale extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = FilamentTheme.of(context);
     return MeshPanel(
-      title: 'This Mac',
+      title: thisMachineCapitalized,
       subtitle: 'The last readings before the engine stopped',
       actions: const [MeshBadge('Not live', tone: MeshTone.caution)],
       footer: Text(
@@ -530,7 +531,7 @@ class _LeftPanel extends StatelessWidget {
     final theme = FilamentTheme.of(context);
     return MeshPanel(
       child: Text(
-        'This Mac is not on a network any more.',
+        '$thisMachineCapitalized is not on a network any more.',
         style: theme.type.bodyDim,
       ),
     );

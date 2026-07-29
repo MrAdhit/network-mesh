@@ -269,7 +269,12 @@ class _Body extends StatelessWidget {
           const MeshDivider(),
           const SizedBox(height: FilamentSpace.x5),
           _managerActions(theme),
-          ManagerActivity(manager: manager),
+          // Nothing on an unmanaged platform ever downloads, verifies or asks
+          // for a password, so there is no activity to report and no failure
+          // that could have come from one. Gated rather than left to render
+          // empty: the phases it names are macOS's, and a platform that cannot
+          // reach them must not be one refactor away from saying so.
+          if (manager.supported) ManagerActivity(manager: manager),
         ],
       ),
     );

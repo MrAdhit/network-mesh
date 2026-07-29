@@ -8,6 +8,7 @@ library;
 
 import 'package:flutter/widgets.dart';
 
+import '../../data/privileged.dart' show thisMachine;
 import '../../kit/button.dart';
 import '../../kit/stage.dart';
 import 'setup_parts.dart';
@@ -33,7 +34,7 @@ class WelcomeStage extends StatelessWidget {
           'One address for every machine, three paths between them — traffic '
           'rides whichever is fastest right now.',
       action: MeshButton.primary(
-        label: 'Set up this Mac',
+        label: 'Set up $thisMachine',
         autofocus: true,
         onPressed: onStart,
       ),

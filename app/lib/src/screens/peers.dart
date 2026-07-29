@@ -15,6 +15,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 
 import '../data/ipc_protocol.dart';
+import '../data/privileged.dart' show thisMachine, thisMachineCapitalized;
 import '../icons/mesh_icons.dart';
 import '../kit/badge.dart';
 import '../kit/button.dart';
@@ -44,7 +45,7 @@ class PeersScreen extends StatelessWidget {
           title: 'Peers',
           subtitle: daemon.reachable && daemon.enrolled
               ? '${countOf(peers.length, 'peer')} on your network'
-              : 'Every machine this Mac can reach, and how',
+              : 'Every machine $thisMachine can reach, and how',
           actions: [
             MeshAsyncIconButton(
               glyph: MeshGlyph.refresh,
@@ -114,7 +115,7 @@ class _PeerPanel extends StatelessWidget {
 
   static String _emptyLine(DaemonStore daemon) {
     if (!daemon.reachable) return 'The mesh engine is stopped';
-    if (!daemon.enrolled) return 'This Mac is not on a network';
+    if (!daemon.enrolled) return '$thisMachineCapitalized is not on a network';
     // What the CLI says, in the app's voice.
     return 'No peers known yet.';
   }
