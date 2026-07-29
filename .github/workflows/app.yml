@@ -1,0 +1,60 @@
+# Build the desktop app and hand back something a person can install.
+#
+# Its own workflow rather than a job in ci.yml, for two reasons. ci.yml runs on main and on pull
+# requests, and the app is developed on branches that want a build per push; and a Flutter
+# toolchain on a macOS runner has nothing in common with the Rust matrix, so sharing a file would
+# only mean every cargo run also waited for a pub get.
+name: app
+
+on:
+  push:
+    branches: ["**"]
+    # The Rust workspace changing cannot break a Flutter build, and a macOS runner is the
+    # most expensive minute here.
+    paths:
+      - "app/**"
+      - ".github/workflows/app.yml"
+  workflow_dispatch:
+
+jobs:
+  macos:
+    name: Mesh.app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          # The SDK is a ~1GB download and every run needs the same one.
+          cache: true
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # Both default to on already; spelled out so a future change to those defaults cannot
+      # quietly turn this into a build that only fails on hard errors.
+      - name: Analyze
+        working-directory: app
+        run: flutter analyze --fatal-infos --fatal-warnings
+
+      - name: Format
+        working-directory: app
+        run: dart format --output=none --set-exit-if-changed lib tool
+
+      - name: Build
+        working-directory: app
+        run: flutter build macos --release
+
+      # Unsigned: signing wants a Developer ID certificate this repository does not carry and
+      # notarization wants an Apple account, so Gatekeeper will refuse a double click. Open it
+      # from the Finder's context menu, or through the Installer, and it goes in as normal.
+      - name: Build the pkg
+        run: packaging/macos-pkg.sh app/build/macos/Build/Products/Release/Mesh.app dist/Mesh.pkg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mesh-macos-pkg
+          path: dist/Mesh.pkg
+          if-no-files-found: error
+          retention-days: 30

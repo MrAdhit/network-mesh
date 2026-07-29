@@ -33,7 +33,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends shellcheck
           sh -n packaging/install.sh
           sh -n packaging/uninstall.sh
-          shellcheck -s sh packaging/install.sh packaging/uninstall.sh packaging/nfpm/*.sh
+          sh -n packaging/macos-pkg.sh
+          shellcheck -s sh packaging/*.sh packaging/nfpm/*.sh
 
   # The same matrix a release is cut from, so nothing is built for the first time on a tag.
   build:
