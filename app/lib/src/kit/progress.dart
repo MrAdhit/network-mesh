@@ -212,20 +212,23 @@ class _Fill extends StatelessWidget {
       tween: Tween<double>(end: fraction),
       duration: drift.duration,
       curve: drift.curve,
-      builder: (context, t, _) => Align(
+      builder: (context, t, _) => FractionallySizedBox(
         alignment: Alignment.centerLeft,
-        child: FractionallySizedBox(
-          // A fill of literally nothing is a dot of colour at the left end
-          // claiming something has happened.
-          widthFactor: t <= 0 ? 0 : t.clamp(0.0, 1.0),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: color,
-              borderRadius: BorderRadius.circular(FilamentRadius.pill),
-              // The fill is live, so it blooms — gently. At 4px tall the
-              // full-strength glow is a smudge twice the height of the bar.
-              boxShadow: tokens.bloom(color, intensity: 0.7, blurScale: 0.5),
-            ),
+        // A fill of literally nothing is a dot of colour at the left end
+        // claiming something has happened.
+        widthFactor: t <= 0 ? 0 : t.clamp(0.0, 1.0),
+        // Both factors, always. The fill is a bare `DecoratedBox` with no
+        // child, so its height comes from nowhere else: leave this off and it
+        // lays out at the right width and zero height, which is a bar that
+        // reads as dead at every fraction.
+        heightFactor: 1,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(FilamentRadius.pill),
+            // The fill is live, so it blooms — gently. At 4px tall the
+            // full-strength glow is a smudge twice the height of the bar.
+            boxShadow: tokens.bloom(color, intensity: 0.7, blurScale: 0.5),
           ),
         ),
       ),
@@ -290,10 +293,13 @@ class _SweepState extends State<_Sweep> with SingleTickerProviderStateMixin {
     );
     return AnimatedBuilder(
       animation: _controller,
-      builder: (context, child) => Align(
+      builder: (context, child) => FractionallySizedBox(
         // In off the left end, out past the right, once per period.
         alignment: Alignment(_sweepTravel * (_controller.value * 2 - 1), 0),
-        child: FractionallySizedBox(widthFactor: _sweepWidth, child: child),
+        widthFactor: _sweepWidth,
+        // As in `_Fill`: the band has no child to be tall for it.
+        heightFactor: 1,
+        child: child,
       ),
       child: band,
     );
